@@ -875,28 +875,28 @@ export default function AttendancePage() {
   return (
     <main className="min-h-dvh bg-stone-50 text-stone-950">
       <header className="border-b border-stone-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-5">
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-3 py-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:px-4 sm:py-5">
           <div>
             <p className="text-sm font-bold text-emerald-700">勤怠管理</p>
             <h1 className="text-2xl font-black leading-tight sm:text-3xl">{adminMode ? "管理者メニュー" : "スタッフ打刻"}</h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="grid min-w-36 gap-1 rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-right">
+          <div className="grid w-full grid-cols-3 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
+            <div className="grid gap-1 rounded-md border border-stone-200 bg-stone-50 px-2 py-2 text-center sm:min-w-36 sm:px-4 sm:py-3 sm:text-right">
               <span className="text-xs font-bold text-stone-500">営業日</span>
-              <span className="text-lg font-black">{currentWorkDate}</span>
+              <span className="text-sm font-black sm:text-lg">{currentWorkDate}</span>
             </div>
-            <div className={`grid min-w-28 gap-1 rounded-md border px-4 py-3 text-right ${dataError ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+            <div className={`grid gap-1 rounded-md border px-2 py-2 text-center sm:min-w-28 sm:px-4 sm:py-3 sm:text-right ${dataError ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
               <span className="text-xs font-bold">{dataError ? "共有エラー" : "共有保存"}</span>
               <span className="text-sm font-black">{dataError ? "要確認" : isSaving ? "保存中" : "同期中"}</span>
             </div>
-            <button className="h-11 rounded-md border border-stone-300 bg-white px-4 text-sm font-black text-stone-700" onClick={handleLogout} type="button">
+            <button className="h-full min-h-11 rounded-md border border-stone-300 bg-white px-2 text-sm font-black text-stone-700 sm:px-4" onClick={handleLogout} type="button">
               ログアウト
             </button>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-6xl gap-4 px-4 py-4">
+      <div className="mx-auto grid max-w-6xl gap-4 px-3 py-3 sm:px-4 sm:py-4">
         {dataError ? <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">{dataError}</p> : null}
 
         {!adminMode && currentStaff ? (
@@ -942,9 +942,9 @@ export default function AttendancePage() {
           <section className="grid content-start gap-4">
             {message ? <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{message}</p> : null}
 
-            <nav className="grid gap-2 rounded-lg border border-stone-200 bg-white p-3 shadow-sm sm:grid-cols-5">
+            <nav className="flex gap-2 overflow-x-auto rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:grid sm:grid-cols-5 sm:overflow-visible sm:p-3">
               {adminMenu.map((item) => (
-                <button className={`h-12 rounded-md px-3 text-sm font-black ${adminView === item.id ? "bg-stone-900 text-white" : "bg-stone-100 text-stone-700"}`} key={item.id} onClick={() => setAdminView(item.id)} type="button">
+                <button className={`h-11 min-w-28 rounded-md px-3 text-sm font-black sm:h-12 sm:min-w-0 ${adminView === item.id ? "bg-stone-900 text-white" : "bg-stone-100 text-stone-700"}`} key={item.id} onClick={() => setAdminView(item.id)} type="button">
                   {item.label}
                 </button>
               ))}
@@ -965,7 +965,45 @@ export default function AttendancePage() {
                 <div className="border-b border-stone-200 px-4 py-3">
                   <h2 className="text-lg font-black">メンバー</h2>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="grid gap-3 p-3 md:hidden">
+                  {employees.map((employee) => (
+                    <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={employee.id}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-stone-500">スタッフコード {employee.staffCode}</p>
+                          {editingEmployeeId === employee.id ? (
+                            <input className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { name: event.target.value })} value={employee.name} />
+                          ) : (
+                            <p className="mt-1 truncate text-xl font-black">{employee.name}</p>
+                          )}
+                        </div>
+                        <button className="h-9 shrink-0 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => setEditingEmployeeId(editingEmployeeId === employee.id ? "" : employee.id)} type="button">
+                          {editingEmployeeId === employee.id ? "完了" : "編集"}
+                        </button>
+                      </div>
+                      {editingEmployeeId === employee.id ? (
+                        <div className="mt-3 grid gap-2">
+                          {employee.id !== "emp-manager" ? <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} /> : null}
+                          <div className="grid grid-cols-[1fr_1fr] gap-2">
+                            <select className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { payType: event.target.value as PayType })} value={employee.payType}>
+                              <option value="hourly">時給</option>
+                              <option value="monthly">月給</option>
+                            </select>
+                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => updateEmployee(employee.id, { payAmount: Number(event.target.value) || 0 })} type="number" value={employeePayAmount(employee)} />
+                          </div>
+                          {employee.id !== "emp-manager" ? (
+                            <button className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => handleDeleteEmployee(employee.id)} type="button">
+                              削除
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="mt-3 rounded-md bg-white px-3 py-2 text-sm font-black">{payLabel(employee)}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="hidden overflow-x-auto md:block">
                   <table className="w-full min-w-[840px] border-collapse text-left text-sm">
                     <thead className="bg-stone-100 text-xs font-black text-stone-600">
                       <tr>
@@ -1062,7 +1100,51 @@ export default function AttendancePage() {
                     <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => setManualMonth(event.target.value)} type="month" value={manualMonth} />
                   </div>
                 </div>
-                <div className="mt-4 overflow-x-auto">
+                <div className="mt-4 grid gap-3 lg:hidden">
+                  {monthDays(manualMonth).map((workDate) => {
+                    const record = manualRecordsByDate.get(workDate);
+                    const draft = draftForDay(workDate, record);
+                    const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
+                    const endAt = draft.endTime ? combineWorkDateAndTime(workDate, draft.endTime, true) : "";
+                    const breakMinutes = timeInputToMinutes(draft.breakMinutes);
+                    const shiftMinutes = endAt ? shiftMinutesFromEndpoints(startAt, endAt) : 0;
+                    const actualMinutes = endAt ? actualMinutesFromDraft(startAt, endAt, breakMinutes) : 0;
+                    return (
+                      <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={workDate}>
+                        <p className="font-black">{workDate}</p>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <label className="grid gap-1 text-xs font-bold text-stone-500">
+                            勤務開始
+                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { startTime: event.target.value })} type="time" value={draft.startTime} />
+                          </label>
+                          <label className="grid gap-1 text-xs font-bold text-stone-500">
+                            勤務終了
+                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { endTime: event.target.value })} type="time" value={draft.endTime} />
+                          </label>
+                          <label className="grid gap-1 text-xs font-bold text-stone-500">
+                            休憩時間
+                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { breakMinutes: event.target.value })} type="time" value={draft.breakMinutes} />
+                          </label>
+                          <div className="grid gap-1 rounded-md bg-white px-3 py-2 text-xs font-bold text-stone-500">
+                            実働時間
+                            <span className="text-base font-black text-stone-950">{endAt ? formatDuration(actualMinutes) : "-"}</span>
+                          </div>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                          <div className="rounded-md bg-white px-3 py-2">
+                            <p className="text-xs font-bold text-stone-500">勤務時間</p>
+                            <p className="font-black">{endAt ? formatDuration(shiftMinutes) : "未登録"}</p>
+                          </div>
+                          <div className="rounded-md bg-white px-3 py-2">
+                            <p className="text-xs font-bold text-stone-500">深夜時間</p>
+                            <p className="font-black">{record ? formatDuration(recordWithRealtime(record, now).nightMinutes) : "0時間00分"}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-4 hidden overflow-x-auto lg:block">
                   <table className="w-full min-w-[980px] border-collapse text-left text-sm">
                     <thead className="bg-stone-100 text-xs font-black text-stone-600">
                       <tr>
@@ -1128,7 +1210,56 @@ export default function AttendancePage() {
                     </button>
                   </div>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="grid gap-3 p-3 lg:hidden">
+                  {visibleRecords.length === 0 ? (
+                    <p className="px-4 py-8 text-center font-bold text-stone-500">この月の勤怠記録はまだありません。</p>
+                  ) : (
+                    visibleRecords.map((record) => {
+                      const employee = employeeById.get(record.employeeId);
+                      const cost = laborCost(record, employee);
+                      return (
+                        <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={record.id}>
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-black">{record.workDate}</p>
+                              <p className="text-sm font-bold text-stone-500">{employee?.name ?? "不明"}</p>
+                            </div>
+                            <button className="h-9 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => handleDeleteRecord(record.id)} type="button">
+                              削除
+                            </button>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">勤務開始</p>
+                              <p className="font-black">{formatTimeOnly(firstStartAt(record))}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">勤務終了</p>
+                              <p className="font-black">{record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record))}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">休憩</p>
+                              <p className="font-black">{formatDuration(calculatedBreakMinutes(record))}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">勤務時間</p>
+                              <p className="font-black">{formatDuration(record.totalMinutes)}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">深夜</p>
+                              <p className="font-black">{formatDuration(record.nightMinutes)}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">人件費</p>
+                              <p className="font-black">{cost === null ? "-" : formatYen(cost)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                <div className="hidden overflow-x-auto lg:block">
                   <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
                     <thead className="bg-stone-100 text-xs font-black text-stone-600">
                       <tr>
