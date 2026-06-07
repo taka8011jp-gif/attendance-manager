@@ -15,9 +15,9 @@ values (
   'main',
   '{
     "employees": [
-      { "id": "emp-manager", "name": "店長", "role": "管理者", "staffCode": "1000", "hourlyWage": 1500 },
-      { "id": "emp-staff-a", "name": "佐藤", "role": "スタッフ", "staffCode": "1001", "hourlyWage": 1200 },
-      { "id": "emp-staff-b", "name": "鈴木", "role": "スタッフ", "staffCode": "1002", "hourlyWage": 1200 }
+      { "id": "emp-manager", "name": "店長", "role": "管理者", "staffCode": "0622", "payType": "hourly", "payAmount": 1500, "hourlyWage": 1500 },
+      { "id": "emp-staff-a", "name": "佐藤", "role": "スタッフ", "staffCode": "1001", "payType": "hourly", "payAmount": 1200, "hourlyWage": 1200 },
+      { "id": "emp-staff-b", "name": "鈴木", "role": "スタッフ", "staffCode": "1002", "payType": "hourly", "payAmount": 1200, "hourlyWage": 1200 }
     ],
     "records": []
   }'::jsonb

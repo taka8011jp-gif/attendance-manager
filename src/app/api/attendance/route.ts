@@ -4,15 +4,26 @@ import path from "node:path";
 
 export const runtime = "nodejs";
 
+type PayType = "hourly" | "monthly";
+
 type Employee = {
   id: string;
   name: string;
   role: string;
   staffCode: string;
+  payType: PayType;
+  payAmount: number;
   hourlyWage: number;
 };
 
 type WorkStatus = "registered" | "working" | "missing";
+type PunchType = "start" | "end";
+
+type Punch = {
+  id: string;
+  type: PunchType;
+  at: string;
+};
 
 type WorkDayRecord = {
   id: string;
@@ -22,6 +33,7 @@ type WorkDayRecord = {
   nightMinutes: number;
   activeStartedAt: string | null;
   status: WorkStatus;
+  punches: Punch[];
 };
 
 type AttendanceStore = {
@@ -29,10 +41,12 @@ type AttendanceStore = {
   records: WorkDayRecord[];
 };
 
+const ADMIN_CODE = "0622";
+
 const seedEmployees: Employee[] = [
-  { id: "emp-manager", name: "店長", role: "管理者", staffCode: "1000", hourlyWage: 1500 },
-  { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", hourlyWage: 1200 },
-  { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", hourlyWage: 1200 }
+  { id: "emp-manager", name: "店長", role: "管理者", staffCode: ADMIN_CODE, payType: "hourly", payAmount: 1500, hourlyWage: 1500 },
+  { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", payType: "hourly", payAmount: 1200, hourlyWage: 1200 },
+  { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", payType: "hourly", payAmount: 1200, hourlyWage: 1200 }
 ];
 
 const dataDir = process.env.ATTENDANCE_DATA_DIR ?? path.join(process.cwd(), "data");
@@ -54,12 +68,16 @@ function businessEnd(workDate: string) {
 function normalizeEmployee(employee: Partial<Employee> & { id?: string }, index: number): Employee {
   const seed = seedEmployees[index] ?? null;
   const hourlyWage = Number(employee.hourlyWage ?? seed?.hourlyWage ?? 1200);
+  const payType: PayType = employee.payType === "monthly" ? "monthly" : "hourly";
+  const payAmount = Number(employee.payAmount ?? employee.hourlyWage ?? seed?.payAmount ?? 1200);
 
   return {
     id: employee.id || `emp-${index + 1}`,
     name: employee.name?.trim() || seed?.name || `スタッフ${index + 1}`,
     role: employee.role?.trim() || seed?.role || "スタッフ",
-    staffCode: String(employee.staffCode || seed?.staffCode || 1000 + index),
+    staffCode: employee.id === "emp-manager" ? ADMIN_CODE : String(employee.staffCode || seed?.staffCode || 1000 + index),
+    payType,
+    payAmount: Number.isFinite(payAmount) && payAmount >= 0 ? Math.floor(payAmount) : 1200,
     hourlyWage: Number.isFinite(hourlyWage) && hourlyWage >= 0 ? Math.floor(hourlyWage) : 1200
   };
 }
@@ -77,7 +95,12 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
     totalMinutes: Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0,
     nightMinutes: Number.isFinite(nightMinutes) ? Math.max(0, Math.floor(nightMinutes)) : 0,
     activeStartedAt: record.activeStartedAt ?? null,
-    status
+    status,
+    punches: Array.isArray(record.punches)
+      ? record.punches.filter((punch): punch is Punch => Boolean(punch?.id && (punch.type === "start" || punch.type === "end") && punch.at))
+      : record.activeStartedAt
+        ? [{ id: `punch-${record.id}`, type: "start", at: record.activeStartedAt }]
+        : []
   };
 }
 
