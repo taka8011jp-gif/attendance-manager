@@ -1,0 +1,19 @@
+{
+  "name": "勤怠管理",
+  "short_name": "勤怠管理",
+  "description": "スタッフの勤務開始、勤務終了、月次勤務時間、深夜時間を管理する勤怠管理アプリ",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fafaf9",
+  "theme_color": "#047857",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
