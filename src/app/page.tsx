@@ -35,6 +35,7 @@ type WorkDayRecord = {
   workDate: string;
   totalMinutes: number;
   nightMinutes: number;
+  breakMinutes: number;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -171,6 +172,70 @@ function formatDuration(totalMinutes: number) {
   return `${hours}時間${String(minutes).padStart(2, "0")}分`;
 }
 
+function formatTimeOnly(value: string) {
+  if (!value) return "-";
+  return value.slice(11, 16);
+}
+
+function minutesToTimeInput(totalMinutes: number) {
+  const hours = Math.floor(Math.max(0, totalMinutes) / 60);
+  const minutes = Math.max(0, totalMinutes) % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function timeInputToMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 0;
+  return Math.max(0, hours * 60 + minutes);
+}
+
+function combineWorkDateAndTime(workDate: string, time: string, isEnd = false) {
+  const [hours, minutes] = time.split(":").map(Number);
+  const date = businessStart(workDate);
+  date.setHours(Number.isFinite(hours) ? hours : 0, Number.isFinite(minutes) ? minutes : 0, 0, 0);
+  if (isEnd && date <= businessStart(workDate)) date.setDate(date.getDate() + 1);
+  if (isEnd && hours < 7) date.setDate(date.getDate() + 1);
+  return localDateTime(date);
+}
+
+function sortedPunches(record?: WorkDayRecord) {
+  return [...(record?.punches ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+}
+
+function firstStartAt(record?: WorkDayRecord) {
+  return sortedPunches(record).find((punch) => punch.type === "start")?.at ?? "";
+}
+
+function lastEndAt(record?: WorkDayRecord) {
+  return [...sortedPunches(record)].reverse().find((punch) => punch.type === "end")?.at ?? "";
+}
+
+function calculatedBreakMinutes(record?: WorkDayRecord) {
+  if (!record) return 0;
+  if (Number.isFinite(record.breakMinutes) && record.breakMinutes > 0) return Math.floor(record.breakMinutes);
+  const punches = sortedPunches(record);
+  let total = 0;
+  for (let index = 0; index < punches.length - 1; index += 1) {
+    const current = punches[index];
+    const next = punches[index + 1];
+    if (current.type === "end" && next.type === "start") {
+      total += intervalMinutes(parseLocalDateTime(current.at), parseLocalDateTime(next.at));
+    }
+  }
+  return Math.max(0, total);
+}
+
+function shiftMinutesFromEndpoints(startAt: string, endAt: string) {
+  const start = parseLocalDateTime(startAt);
+  const end = parseLocalDateTime(endAt);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return 0;
+  return intervalMinutes(start, end);
+}
+
+function actualMinutesFromDraft(startAt: string, endAt: string, breakMinutes: number) {
+  return Math.max(0, shiftMinutesFromEndpoints(startAt, endAt) - breakMinutes);
+}
+
 function formatYen(value: number) {
   return `¥${Math.round(value).toLocaleString("ja-JP")}`;
 }
@@ -239,6 +304,7 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
   const endMinutes = minutesFromTime(record.clockOut ?? "");
   let totalMinutes = Number(record.totalMinutes ?? 0);
   let nightMinutes = Number(record.nightMinutes ?? 0);
+  let breakMinutes = Number(record.breakMinutes ?? record.manualBreakMinutes ?? 0);
   let status: WorkStatus = record.status ?? "registered";
   let punches: Punch[] = Array.isArray(record.punches) ? record.punches : [];
 
@@ -247,6 +313,7 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
     const end = new Date(`${record.date}T${record.clockOut}`);
     if (endMinutes < startMinutes) end.setDate(end.getDate() + 1);
     totalMinutes = Math.max(0, intervalMinutes(start, end) - oldBreakMinutes(record));
+    breakMinutes = oldBreakMinutes(record);
     nightMinutes = nightMinutesBetween(start, end);
     status = totalMinutes > 0 ? "registered" : "missing";
     punches = buildPunches(workDate, localDateTime(start), localDateTime(end));
@@ -262,6 +329,7 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
     workDate,
     totalMinutes: Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0,
     nightMinutes: Number.isFinite(nightMinutes) ? Math.max(0, Math.floor(nightMinutes)) : 0,
+    breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches
@@ -360,7 +428,7 @@ export default function AttendancePage() {
   const [newPayAmount, setNewPayAmount] = useState("1200");
   const [manualEmployeeId, setManualEmployeeId] = useState(seedEmployees[0].id);
   const [manualMonth, setManualMonth] = useState(currentMonth());
-  const [manualDrafts, setManualDrafts] = useState<Record<string, { startAt: string; endAt: string; status: WorkStatus }>>({});
+  const [manualDrafts, setManualDrafts] = useState<Record<string, { startTime: string; endTime: string; breakMinutes: string }>>({});
   const [recordEmployeeId, setRecordEmployeeId] = useState("all");
   const [recordMonth, setRecordMonth] = useState(currentMonth());
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
@@ -561,6 +629,7 @@ export default function AttendancePage() {
         workDate,
         totalMinutes: existing?.status === "missing" ? 0 : existing?.totalMinutes ?? 0,
         nightMinutes: existing?.status === "missing" ? 0 : existing?.nightMinutes ?? 0,
+        breakMinutes: existing?.status === "missing" ? 0 : calculatedBreakMinutes(existing),
         activeStartedAt: timestampText,
         status: "working",
         punches: [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start", at: timestampText }]
@@ -572,13 +641,16 @@ export default function AttendancePage() {
     const startedAt = parseLocalDateTime(existing.activeStartedAt);
     const endAt = new Date(Math.min(timestamp.getTime(), businessEnd(existing.workDate).getTime()));
     const endText = localDateTime(endAt);
+    const nextPunches = [...existing.punches, { id: createId("punch"), type: "end" as const, at: endText }];
+    const nextRecord = { ...existing, punches: nextPunches };
     upsertRecord({
       ...existing,
       totalMinutes: existing.totalMinutes + intervalMinutes(startedAt, endAt),
       nightMinutes: existing.nightMinutes + nightMinutesBetween(startedAt, endAt),
+      breakMinutes: calculatedBreakMinutes(nextRecord),
       activeStartedAt: null,
       status: "registered",
-      punches: [...existing.punches, { id: createId("punch"), type: "end", at: endText }]
+      punches: nextPunches
     });
     setMessage("勤務終了を記録しました。");
   }
@@ -651,14 +723,14 @@ export default function AttendancePage() {
   function draftForDay(workDate: string, record?: WorkDayRecord) {
     return (
       manualDrafts[workDate] ?? {
-        startAt: firstPunch(record, "start") || defaultStartAt(workDate),
-        endAt: lastPunch(record, "end") || defaultEndAt(workDate),
-        status: record?.status ?? "registered"
+        startTime: formatTimeOnly(firstStartAt(record) || defaultStartAt(workDate)),
+        endTime: record?.status === "missing" ? "" : formatTimeOnly(lastEndAt(record) || defaultEndAt(workDate)),
+        breakMinutes: minutesToTimeInput(calculatedBreakMinutes(record))
       }
     );
   }
 
-  function updateManualDraft(workDate: string, patch: Partial<{ startAt: string; endAt: string; status: WorkStatus }>) {
+  function updateManualDraft(workDate: string, patch: Partial<{ startTime: string; endTime: string; breakMinutes: string }>) {
     const record = manualRecordsByDate.get(workDate);
     setManualDrafts((current) => ({
       ...current,
@@ -669,43 +741,57 @@ export default function AttendancePage() {
     }));
   }
 
-  function saveManualDay(workDate: string) {
+  function saveManualMonth() {
     if (!adminMode || !manualEmployeeId) return;
-    const existing = manualRecordsByDate.get(workDate);
-    const draft = draftForDay(workDate, existing);
-    if (draft.status === "missing") {
-      upsertRecord({
+    const nextRecords = monthDays(manualMonth).map((workDate) => {
+      const existing = manualRecordsByDate.get(workDate);
+      const draft = draftForDay(workDate, existing);
+      const breakMinutes = timeInputToMinutes(draft.breakMinutes);
+
+      if (!draft.endTime) {
+        return {
+          id: existing?.id ?? createId("work-day"),
+          employeeId: manualEmployeeId,
+          workDate,
+          totalMinutes: 0,
+          nightMinutes: 0,
+          breakMinutes: 0,
+          activeStartedAt: null,
+          status: "missing" as const,
+          punches: draft.startTime ? [{ id: createId("punch"), type: "start" as const, at: combineWorkDateAndTime(workDate, draft.startTime) }] : []
+        };
+      }
+
+      const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
+      const endAt = combineWorkDateAndTime(workDate, draft.endTime, true);
+      const start = parseLocalDateTime(startAt);
+      const end = parseLocalDateTime(endAt);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+
+      return {
         id: existing?.id ?? createId("work-day"),
         employeeId: manualEmployeeId,
         workDate,
-        totalMinutes: 0,
-        nightMinutes: 0,
+        totalMinutes: Math.max(0, intervalMinutes(start, end) - breakMinutes),
+        nightMinutes: nightMinutesBetween(start, end),
+        breakMinutes,
         activeStartedAt: null,
-        status: "missing",
-        punches: []
-      });
-      setMessage(`${workDate} を未登録で保存しました。`);
-      return;
-    }
+        status: "registered" as const,
+        punches: buildPunches(workDate, startAt, endAt)
+      };
+    });
 
-    const start = parseLocalDateTime(draft.startAt);
-    const end = parseLocalDateTime(draft.endAt);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    if (nextRecords.some((record) => record === null)) {
       setMessage("勤務終了は勤務開始より後の時刻にしてください。");
       return;
     }
 
-    upsertRecord({
-      id: existing?.id ?? createId("work-day"),
-      employeeId: manualEmployeeId,
-      workDate,
-      totalMinutes: intervalMinutes(start, end),
-      nightMinutes: nightMinutesBetween(start, end),
-      activeStartedAt: null,
-      status: "registered",
-      punches: buildPunches(workDate, draft.startAt, draft.endAt)
+    setRecords((current) => {
+      const targetDates = new Set(monthDays(manualMonth));
+      const others = current.filter((record) => record.employeeId !== manualEmployeeId || !targetDates.has(record.workDate));
+      return [...others, ...(nextRecords.filter(Boolean) as WorkDayRecord[])];
     });
-    setMessage(`${workDate} を保存しました。`);
+    setMessage(`${manualMonth} の勤怠を保存しました。`);
   }
 
   function handleDeleteRecord(recordId: string) {
@@ -715,7 +801,7 @@ export default function AttendancePage() {
   }
 
   function exportRecordsCsv() {
-    const rows: Array<Array<string | number>> = [["日付", "氏名", "スタッフコード", "状態", "勤務開始", "勤務終了", "勤務時間", "深夜時間", "人件費"]];
+    const rows: Array<Array<string | number>> = [["日付", "氏名", "スタッフコード", "勤務開始", "勤務終了", "休憩時間", "実働時間", "深夜時間", "人件費"]];
     visibleRecords.forEach((record) => {
       const employee = employeeById.get(record.employeeId);
       const cost = laborCost(record, employee);
@@ -723,9 +809,9 @@ export default function AttendancePage() {
         record.workDate,
         employee?.name ?? "不明",
         employee?.staffCode ?? "",
-        statusLabel(record.status),
-        firstPunch(record, "start"),
-        lastPunch(record, "end"),
+        formatTimeOnly(firstStartAt(record)),
+        record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record)),
+        formatDuration(calculatedBreakMinutes(record)),
         formatDuration(record.totalMinutes),
         formatDuration(record.nightMinutes),
         cost === null ? "-" : Math.round(cost)
@@ -977,50 +1063,49 @@ export default function AttendancePage() {
                   </div>
                 </div>
                 <div className="mt-4 overflow-x-auto">
-                  <table className="w-full min-w-[940px] border-collapse text-left text-sm">
+                  <table className="w-full min-w-[980px] border-collapse text-left text-sm">
                     <thead className="bg-stone-100 text-xs font-black text-stone-600">
                       <tr>
                         <th className="px-4 py-3">日付</th>
                         <th className="px-4 py-3">勤務開始</th>
                         <th className="px-4 py-3">勤務終了</th>
-                        <th className="px-4 py-3">状態</th>
                         <th className="px-4 py-3">勤務時間</th>
-                        <th className="px-4 py-3">深夜時間</th>
-                        <th className="px-4 py-3">操作</th>
+                        <th className="px-4 py-3">休憩時間</th>
+                        <th className="px-4 py-3">実働時間</th>
                       </tr>
                     </thead>
                     <tbody>
                       {monthDays(manualMonth).map((workDate) => {
                         const record = manualRecordsByDate.get(workDate);
                         const draft = draftForDay(workDate, record);
+                        const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
+                        const endAt = draft.endTime ? combineWorkDateAndTime(workDate, draft.endTime, true) : "";
+                        const breakMinutes = timeInputToMinutes(draft.breakMinutes);
+                        const shiftMinutes = endAt ? shiftMinutesFromEndpoints(startAt, endAt) : 0;
+                        const actualMinutes = endAt ? actualMinutesFromDraft(startAt, endAt, breakMinutes) : 0;
                         return (
                           <tr className="border-t border-stone-100" key={workDate}>
                             <td className="px-4 py-3 font-black">{workDate}</td>
                             <td className="px-4 py-3">
-                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { startAt: event.target.value })} type="datetime-local" value={draft.startAt} />
+                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { startTime: event.target.value })} type="time" value={draft.startTime} />
                             </td>
                             <td className="px-4 py-3">
-                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { endAt: event.target.value })} type="datetime-local" value={draft.endAt} />
+                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { endTime: event.target.value })} type="time" value={draft.endTime} />
                             </td>
+                            <td className="px-4 py-3">{endAt ? formatDuration(shiftMinutes) : "未登録"}</td>
                             <td className="px-4 py-3">
-                              <select className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { status: event.target.value as WorkStatus })} value={draft.status}>
-                                <option value="registered">登録済み</option>
-                                <option value="missing">未登録</option>
-                              </select>
+                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { breakMinutes: event.target.value })} type="time" value={draft.breakMinutes} />
                             </td>
-                            <td className="px-4 py-3">{record ? formatDuration(recordWithRealtime(record, now).totalMinutes) : "-"}</td>
-                            <td className="px-4 py-3">{record ? formatDuration(recordWithRealtime(record, now).nightMinutes) : "-"}</td>
-                            <td className="px-4 py-3">
-                              <button className="h-9 rounded-md bg-emerald-700 px-3 text-sm font-black text-white" onClick={() => saveManualDay(workDate)} type="button">
-                                保存
-                              </button>
-                            </td>
+                            <td className="px-4 py-3 font-black">{endAt ? formatDuration(actualMinutes) : "-"}</td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
                 </div>
+                <button className="mt-4 h-11 rounded-md bg-emerald-700 px-4 font-black text-white" onClick={saveManualMonth} type="button">
+                  保存
+                </button>
               </div>
             ) : null}
 
@@ -1049,9 +1134,9 @@ export default function AttendancePage() {
                       <tr>
                         <th className="px-4 py-3">日付</th>
                         <th className="px-4 py-3">氏名</th>
-                        <th className="px-4 py-3">状態</th>
                         <th className="px-4 py-3">勤務開始</th>
                         <th className="px-4 py-3">勤務終了</th>
+                        <th className="px-4 py-3">休憩時間</th>
                         <th className="px-4 py-3">勤務時間</th>
                         <th className="px-4 py-3">深夜時間</th>
                         <th className="px-4 py-3">人件費</th>
@@ -1073,9 +1158,9 @@ export default function AttendancePage() {
                             <tr className="border-t border-stone-100" key={record.id}>
                               <td className="px-4 py-3 font-bold">{record.workDate}</td>
                               <td className="px-4 py-3 font-black">{employee?.name ?? "不明"}</td>
-                              <td className="px-4 py-3 font-black">{statusLabel(record.status)}</td>
-                              <td className="px-4 py-3">{firstPunch(record, "start") || "-"}</td>
-                              <td className="px-4 py-3">{lastPunch(record, "end") || "-"}</td>
+                              <td className="px-4 py-3">{formatTimeOnly(firstStartAt(record))}</td>
+                              <td className="px-4 py-3">{record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record))}</td>
+                              <td className="px-4 py-3">{formatDuration(calculatedBreakMinutes(record))}</td>
                               <td className="px-4 py-3 font-black">{formatDuration(record.totalMinutes)}</td>
                               <td className="px-4 py-3">{formatDuration(record.nightMinutes)}</td>
                               <td className="px-4 py-3 font-black">{cost === null ? "-" : formatYen(cost)}</td>

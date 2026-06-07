@@ -31,6 +31,7 @@ type WorkDayRecord = {
   workDate: string;
   totalMinutes: number;
   nightMinutes: number;
+  breakMinutes: number;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -87,6 +88,7 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
   const status: WorkStatus = record.status === "working" || record.status === "missing" ? record.status : "registered";
   const totalMinutes = Number(record.totalMinutes ?? 0);
   const nightMinutes = Number(record.nightMinutes ?? 0);
+  const breakMinutes = Number(record.breakMinutes ?? 0);
 
   return {
     id: record.id,
@@ -94,6 +96,7 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
     workDate: record.workDate,
     totalMinutes: Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0,
     nightMinutes: Number.isFinite(nightMinutes) ? Math.max(0, Math.floor(nightMinutes)) : 0,
+    breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches: Array.isArray(record.punches)
