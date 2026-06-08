@@ -42,10 +42,10 @@ type AttendanceStore = {
   records: WorkDayRecord[];
 };
 
-const ADMIN_CODE = "0622";
+const DEFAULT_ADMIN_CODE = "0622";
 
 const seedEmployees: Employee[] = [
-  { id: "emp-manager", name: "店長", role: "管理者", staffCode: ADMIN_CODE, payType: "hourly", payAmount: 1500, hourlyWage: 1500 },
+  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "hourly", payAmount: 1500, hourlyWage: 1500 },
   { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", payType: "hourly", payAmount: 1200, hourlyWage: 1200 },
   { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", payType: "hourly", payAmount: 1200, hourlyWage: 1200 }
 ];
@@ -76,7 +76,7 @@ function normalizeEmployee(employee: Partial<Employee> & { id?: string }, index:
     id: employee.id || `emp-${index + 1}`,
     name: employee.name?.trim() || seed?.name || `スタッフ${index + 1}`,
     role: employee.role?.trim() || seed?.role || "スタッフ",
-    staffCode: employee.id === "emp-manager" ? ADMIN_CODE : String(employee.staffCode || seed?.staffCode || 1000 + index),
+    staffCode: String(employee.staffCode || seed?.staffCode || 1000 + index),
     payType,
     payAmount: Number.isFinite(payAmount) && payAmount >= 0 ? Math.floor(payAmount) : 1200,
     hourlyWage: Number.isFinite(hourlyWage) && hourlyWage >= 0 ? Math.floor(hourlyWage) : 1200

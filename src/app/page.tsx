@@ -60,10 +60,11 @@ type AttendanceStore = {
 
 type AdminView = "menu" | "members" | "add-member" | "manual" | "records" | "summary";
 
-const ADMIN_CODE = "0622";
+const DEFAULT_ADMIN_CODE = "0622";
+const DEVELOPER_CODE = "19788011";
 
 const seedEmployees: Employee[] = [
-  { id: "emp-manager", name: "店長", role: "管理者", staffCode: ADMIN_CODE, payType: "hourly", payAmount: 1500 },
+  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "hourly", payAmount: 1500 },
   { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", payType: "hourly", payAmount: 1200 },
   { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", payType: "hourly", payAmount: 1200 }
 ];
@@ -256,6 +257,7 @@ function employeePayAmount(employee: Employee) {
 
 function payLabel(employee: Employee) {
   const label = employee.payType === "monthly" ? "月給" : "時給";
+  if (employee.payType === "monthly" && employeePayAmount(employee) <= 0) return label;
   return `${label} ${formatYen(employeePayAmount(employee))}`;
 }
 
@@ -276,7 +278,7 @@ function normalizeEmployee(employee: StoredEmployee, index: number): Employee {
   const oldHourly = Number(employee.hourlyWage ?? seed?.payAmount ?? 1200);
   const payType: PayType = employee.payType === "monthly" ? "monthly" : "hourly";
   const rawAmount = Number(employee.payAmount ?? employee.hourlyWage ?? seed?.payAmount ?? 1200);
-  const staffCode = employee.id === "emp-manager" ? ADMIN_CODE : String(employee.staffCode || seed?.staffCode || 1000 + index);
+  const staffCode = String(employee.staffCode || seed?.staffCode || 1000 + index);
 
   return {
     id: employee.id,
@@ -591,14 +593,14 @@ export default function AttendancePage() {
   function codeExists(code: string, exceptEmployeeId?: string) {
     const normalizedCode = code.trim();
     if (!normalizedCode) return false;
-    if (normalizedCode === ADMIN_CODE && exceptEmployeeId !== "emp-manager") return true;
+    if (normalizedCode === DEVELOPER_CODE) return true;
     return employees.some((employee) => employee.id !== exceptEmployeeId && employee.staffCode === normalizedCode);
   }
 
   function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const code = codeInput.trim();
-    if (code === ADMIN_CODE) {
+    if (code === DEVELOPER_CODE) {
       setAdminMode(true);
       setAdminView("menu");
       setCurrentStaffId("");
@@ -611,6 +613,16 @@ export default function AttendancePage() {
     const employee = findEmployeeByCode(code);
     if (!employee) {
       setLoginError("スタッフコードが見つかりません。");
+      return;
+    }
+
+    if (employee.id === "emp-manager") {
+      setAdminMode(true);
+      setAdminView("menu");
+      setCurrentStaffId("");
+      setCodeInput("");
+      setLoginError("");
+      setMessage("管理者メニューを開きました。");
       return;
     }
 
@@ -686,7 +698,7 @@ export default function AttendancePage() {
           ? {
               ...employee,
               ...patch,
-              staffCode: employee.id === "emp-manager" ? ADMIN_CODE : patch.staffCode === undefined ? employee.staffCode : patch.staffCode.trim(),
+              staffCode: patch.staffCode === undefined ? employee.staffCode : patch.staffCode.trim(),
               payAmount: patch.payAmount === undefined ? employee.payAmount : Math.max(0, Math.floor(patch.payAmount)),
               hourlyWage: patch.payAmount === undefined ? employee.hourlyWage : Math.max(0, Math.floor(patch.payAmount))
             }
@@ -700,7 +712,7 @@ export default function AttendancePage() {
     if (!adminMode) return;
     const name = newEmployeeName.trim();
     const staffCode = newEmployeeCode.trim();
-    const payAmount = Math.max(0, Math.floor(Number(newPayAmount) || 0));
+    const payAmount = newPayType === "monthly" ? 0 : Math.max(0, Math.floor(Number(newPayAmount) || 0));
     if (!name || !staffCode) {
       setMessage("スタッフコードと氏名を入力してください。");
       return;
@@ -1035,7 +1047,7 @@ export default function AttendancePage() {
                       </div>
                       {editingEmployeeId === employee.id ? (
                         <div className="mt-3 grid gap-2">
-                          {employee.id !== "emp-manager" ? <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} /> : null}
+                          <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} />
                           <div className="grid grid-cols-[1fr_1fr] gap-2">
                             <select className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { payType: event.target.value as PayType })} value={employee.payType}>
                               <option value="hourly">時給</option>
@@ -1069,7 +1081,7 @@ export default function AttendancePage() {
                       {employees.map((employee) => (
                         <tr className="border-t border-stone-100" key={employee.id}>
                           <td className="px-4 py-3">
-                            {editingEmployeeId === employee.id && employee.id !== "emp-manager" ? <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} /> : <span className="font-black">{employee.staffCode}</span>}
+                            {editingEmployeeId === employee.id ? <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} /> : <span className="font-black">{employee.staffCode}</span>}
                           </td>
                           <td className="px-4 py-3">
                             {editingEmployeeId === employee.id ? <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { name: event.target.value })} value={employee.name} /> : <span className="font-black">{employee.name}</span>}
@@ -1126,10 +1138,12 @@ export default function AttendancePage() {
                       <option value="monthly">月給</option>
                     </select>
                   </label>
-                  <label className="grid gap-2 text-sm font-bold text-stone-600">
-                    金額（円）:
-                    <input className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => setNewPayAmount(event.target.value)} type="number" value={newPayAmount} />
-                  </label>
+                  {newPayType === "hourly" ? (
+                    <label className="grid gap-2 text-sm font-bold text-stone-600">
+                      金額（円）:
+                      <input className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => setNewPayAmount(event.target.value)} type="number" value={newPayAmount} />
+                    </label>
+                  ) : null}
                 </div>
                 <button className="mt-3 h-11 rounded-md bg-emerald-700 px-4 font-black text-white" type="submit">
                   登録
@@ -1251,7 +1265,7 @@ export default function AttendancePage() {
             ) : null}
 
             {adminView === "records" ? (
-              <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
+              <div className="order-2 overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 px-4 py-3">
                   <h2 className="text-lg font-black">勤怠記録</h2>
                   <div className="flex flex-wrap gap-2">
@@ -1370,7 +1384,7 @@ export default function AttendancePage() {
             ) : null}
 
             {adminView === "records" ? (
-              <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+              <div className="order-1 rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="text-lg font-black">月次サマリー</h2>
                   <div className="flex flex-wrap gap-2">
