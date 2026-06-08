@@ -528,22 +528,24 @@ export default function AttendancePage() {
 
   const employeeById = useMemo(() => new Map(employees.map((employee) => [employee.id, employee])), [employees]);
   const currentStaff = employeeById.get(currentStaffId) ?? null;
+  const adminStaff = employeeById.get("emp-manager") ?? null;
+  const punchStaff = currentStaff ?? (adminMode ? adminStaff : null);
   const currentWorkDate = businessDate(now);
-  const currentRecord = currentStaff ? records.find((record) => record.employeeId === currentStaff.id && record.workDate === currentWorkDate) : null;
+  const currentRecord = punchStaff ? records.find((record) => record.employeeId === punchStaff.id && record.workDate === currentWorkDate) : null;
   const currentRealtimeRecord = currentRecord ? recordWithRealtime(currentRecord, now) : null;
   const currentIsWorking = currentRecord?.status === "working" && Boolean(currentRecord.activeStartedAt);
 
   const currentMonthSummary = useMemo(() => {
-    if (!currentStaff) return null;
+    if (!punchStaff) return null;
     const staffMonthRecords = records
-      .filter((record) => record.employeeId === currentStaff.id && record.workDate.startsWith(currentWorkDate.slice(0, 7)))
+      .filter((record) => record.employeeId === punchStaff.id && record.workDate.startsWith(currentWorkDate.slice(0, 7)))
       .map((record) => recordWithRealtime(record, now));
     return {
       totalMinutes: staffMonthRecords.reduce((sum, record) => sum + record.totalMinutes, 0),
       nightMinutes: staffMonthRecords.reduce((sum, record) => sum + record.nightMinutes, 0),
-      pay: monthlyPay(staffMonthRecords, currentStaff)
+      pay: monthlyPay(staffMonthRecords, punchStaff)
     };
-  }, [currentStaff, currentWorkDate, records, now]);
+  }, [punchStaff, currentWorkDate, records, now]);
 
   const manualRecordsByDate = useMemo(() => {
     const map = new Map<string, WorkDayRecord>();
@@ -641,16 +643,16 @@ export default function AttendancePage() {
   }
 
   function handleWorkToggle() {
-    if (!currentStaff) return;
+    if (!punchStaff) return;
     const timestamp = new Date();
     const timestampText = localDateTime(timestamp);
     const workDate = businessDate(timestamp);
-    const existing = records.find((record) => record.employeeId === currentStaff.id && record.workDate === workDate);
+    const existing = records.find((record) => record.employeeId === punchStaff.id && record.workDate === workDate);
 
     if (!existing || existing.status !== "working" || !existing.activeStartedAt) {
       upsertRecord({
         id: existing?.id ?? createId("work-day"),
-        employeeId: currentStaff.id,
+        employeeId: punchStaff.id,
         workDate,
         totalMinutes: existing?.status === "missing" ? 0 : existing?.totalMinutes ?? 0,
         nightMinutes: existing?.status === "missing" ? 0 : existing?.nightMinutes ?? 0,
@@ -1005,6 +1007,40 @@ export default function AttendancePage() {
         {adminMode ? (
           <section className="grid content-start gap-4">
             {message ? <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{message}</p> : null}
+
+            {punchStaff ? (
+              <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-stone-500">管理者打刻</p>
+                    <h2 className="truncate text-xl font-black">{punchStaff.name}</h2>
+                  </div>
+                  <span className={`w-fit rounded-md border px-3 py-2 text-sm font-black ${currentIsWorking ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-stone-200 bg-stone-100 text-stone-600"}`}>
+                    {currentIsWorking ? "勤務中" : "待機中"}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(180px,240px)_1fr] sm:items-stretch">
+                  <button className={`h-14 rounded-md px-4 text-lg font-black text-white shadow-sm ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} onClick={handleWorkToggle} type="button">
+                    {currentIsWorking ? "勤務終了" : "勤務開始"}
+                  </button>
+                  <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-3">
+                    <div className="rounded-md bg-stone-50 p-3">
+                      <p className="font-bold text-stone-500">本日の勤務</p>
+                      <p className="font-black">{currentRealtimeRecord ? formatDuration(currentRealtimeRecord.totalMinutes) : "0時間00分"}</p>
+                    </div>
+                    <div className="rounded-md bg-stone-50 p-3">
+                      <p className="font-bold text-stone-500">当月の勤務</p>
+                      <p className="font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.totalMinutes) : "0時間00分"}</p>
+                    </div>
+                    <div className="rounded-md bg-stone-50 p-3 max-sm:col-span-2">
+                      <p className="font-bold text-stone-500">当月の深夜</p>
+                      <p className="font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
+                    </div>
+                  </div>
+                </div>
+                {currentRealtimeRecord?.status === "missing" ? <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">前回の勤務終了が未登録です。手入力・修正で修正してください。</p> : null}
+              </div>
+            ) : null}
 
             <nav className="flex gap-2 overflow-x-auto rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:grid sm:grid-cols-3 sm:overflow-visible sm:p-3">
               {adminMenu.map((item) => (
