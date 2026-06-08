@@ -20,7 +20,7 @@ type StoredEmployee = Partial<Employee> & {
   role?: string;
 };
 
-type WorkStatus = "registered" | "working" | "missing";
+type WorkStatus = "registered" | "working" | "missing" | "off";
 type PunchType = "start" | "end";
 
 type Punch = {
@@ -69,11 +69,9 @@ const seedEmployees: Employee[] = [
 ];
 
 const adminMenu: Array<{ id: AdminView; label: string }> = [
-  { id: "members", label: "メンバー" },
-  { id: "add-member", label: "メンバー追加" },
+  { id: "members", label: "メンバー管理" },
   { id: "manual", label: "手入力・修正" },
-  { id: "records", label: "勤怠記録" },
-  { id: "summary", label: "月次サマリー" }
+  { id: "records", label: "勤怠記録・月次" }
 ];
 
 function createId(prefix: string) {
@@ -208,6 +206,17 @@ function firstStartAt(record?: WorkDayRecord) {
 
 function lastEndAt(record?: WorkDayRecord) {
   return [...sortedPunches(record)].reverse().find((punch) => punch.type === "end")?.at ?? "";
+}
+
+function startDisplay(record: WorkDayRecord) {
+  if (record.status === "off") return "休み";
+  return formatTimeOnly(firstStartAt(record));
+}
+
+function endDisplay(record: WorkDayRecord) {
+  if (record.status === "off") return "休み";
+  if (record.status === "missing") return "未登録";
+  return formatTimeOnly(lastEndAt(record));
 }
 
 function calculatedBreakMinutes(record?: WorkDayRecord) {
@@ -362,6 +371,7 @@ function closeExpiredRecords(records: WorkDayRecord[], now: Date) {
 function statusLabel(status: WorkStatus) {
   if (status === "working") return "勤務中";
   if (status === "missing") return "未登録";
+  if (status === "off") return "休み";
   return "登録済み";
 }
 
@@ -428,10 +438,12 @@ export default function AttendancePage() {
   const [newPayAmount, setNewPayAmount] = useState("1200");
   const [manualEmployeeId, setManualEmployeeId] = useState(seedEmployees[0].id);
   const [manualMonth, setManualMonth] = useState(currentMonth());
+  const [manualDate, setManualDate] = useState(businessDate(new Date()));
   const [manualDrafts, setManualDrafts] = useState<Record<string, { startTime: string; endTime: string; breakMinutes: string }>>({});
   const [recordEmployeeId, setRecordEmployeeId] = useState("all");
   const [recordMonth, setRecordMonth] = useState(currentMonth());
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
+  const [saveNotice, setSaveNotice] = useState("");
   const hasLoadedStore = useRef(false);
 
   useEffect(() => {
@@ -526,7 +538,8 @@ export default function AttendancePage() {
       .map((record) => recordWithRealtime(record, now));
     return {
       totalMinutes: staffMonthRecords.reduce((sum, record) => sum + record.totalMinutes, 0),
-      nightMinutes: staffMonthRecords.reduce((sum, record) => sum + record.nightMinutes, 0)
+      nightMinutes: staffMonthRecords.reduce((sum, record) => sum + record.nightMinutes, 0),
+      pay: monthlyPay(staffMonthRecords, currentStaff)
     };
   }, [currentStaff, currentWorkDate, records, now]);
 
@@ -723,8 +736,8 @@ export default function AttendancePage() {
   function draftForDay(workDate: string, record?: WorkDayRecord) {
     return (
       manualDrafts[workDate] ?? {
-        startTime: formatTimeOnly(firstStartAt(record) || defaultStartAt(workDate)),
-        endTime: record?.status === "missing" ? "" : formatTimeOnly(lastEndAt(record) || defaultEndAt(workDate)),
+        startTime: record?.status === "off" || !record ? "" : formatTimeOnly(firstStartAt(record) || defaultStartAt(workDate)),
+        endTime: record?.status === "missing" || record?.status === "off" || !record ? "" : formatTimeOnly(lastEndAt(record) || defaultEndAt(workDate)),
         breakMinutes: minutesToTimeInput(calculatedBreakMinutes(record))
       }
     );
@@ -741,45 +754,78 @@ export default function AttendancePage() {
     }));
   }
 
-  function saveManualMonth() {
-    if (!adminMode || !manualEmployeeId) return;
-    const nextRecords = monthDays(manualMonth).map((workDate) => {
-      const existing = manualRecordsByDate.get(workDate);
-      const draft = draftForDay(workDate, existing);
-      const breakMinutes = timeInputToMinutes(draft.breakMinutes);
+  function manualRecordFromDraft(workDate: string) {
+    const existing = manualRecordsByDate.get(workDate);
+    const draft = draftForDay(workDate, existing);
+    const breakMinutes = timeInputToMinutes(draft.breakMinutes);
 
-      if (!draft.endTime) {
-        return {
-          id: existing?.id ?? createId("work-day"),
-          employeeId: manualEmployeeId,
-          workDate,
-          totalMinutes: 0,
-          nightMinutes: 0,
-          breakMinutes: 0,
-          activeStartedAt: null,
-          status: "missing" as const,
-          punches: draft.startTime ? [{ id: createId("punch"), type: "start" as const, at: combineWorkDateAndTime(workDate, draft.startTime) }] : []
-        };
-      }
-
-      const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
-      const endAt = combineWorkDateAndTime(workDate, draft.endTime, true);
-      const start = parseLocalDateTime(startAt);
-      const end = parseLocalDateTime(endAt);
-      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
-
+    if (!draft.startTime && !draft.endTime) {
       return {
         id: existing?.id ?? createId("work-day"),
         employeeId: manualEmployeeId,
         workDate,
-        totalMinutes: Math.max(0, intervalMinutes(start, end) - breakMinutes),
-        nightMinutes: nightMinutesBetween(start, end),
-        breakMinutes,
+        totalMinutes: 0,
+        nightMinutes: 0,
+        breakMinutes: 0,
         activeStartedAt: null,
-        status: "registered" as const,
-        punches: buildPunches(workDate, startAt, endAt)
+        status: "off" as const,
+        punches: []
       };
-    });
+    }
+
+    if (!draft.endTime) {
+      return {
+        id: existing?.id ?? createId("work-day"),
+        employeeId: manualEmployeeId,
+        workDate,
+        totalMinutes: 0,
+        nightMinutes: 0,
+        breakMinutes: 0,
+        activeStartedAt: null,
+        status: "missing" as const,
+        punches: draft.startTime ? [{ id: createId("punch"), type: "start" as const, at: combineWorkDateAndTime(workDate, draft.startTime) }] : []
+      };
+    }
+
+    const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
+    const endAt = combineWorkDateAndTime(workDate, draft.endTime, true);
+    const start = parseLocalDateTime(startAt);
+    const end = parseLocalDateTime(endAt);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+
+    return {
+      id: existing?.id ?? createId("work-day"),
+      employeeId: manualEmployeeId,
+      workDate,
+      totalMinutes: Math.max(0, intervalMinutes(start, end) - breakMinutes),
+      nightMinutes: nightMinutesBetween(start, end),
+      breakMinutes,
+      activeStartedAt: null,
+      status: "registered" as const,
+      punches: buildPunches(workDate, startAt, endAt)
+    };
+  }
+
+  function showSavedNotice(text: string) {
+    setSaveNotice(text);
+    window.setTimeout(() => setSaveNotice(""), 1800);
+  }
+
+  function saveManualSingleDay() {
+    if (!adminMode || !manualEmployeeId) return;
+    const nextRecord = manualRecordFromDraft(manualDate);
+    if (!nextRecord) {
+      setMessage("勤務終了は勤務開始より後の時刻にしてください。");
+      return;
+    }
+    upsertRecord(nextRecord);
+    setMessage(`${manualDate} を保存しました。`);
+    showSavedNotice("保存しました");
+  }
+
+  function saveManualMonth() {
+    if (!adminMode || !manualEmployeeId) return;
+    const nextRecords = monthDays(manualMonth).map((workDate) => manualRecordFromDraft(workDate));
 
     if (nextRecords.some((record) => record === null)) {
       setMessage("勤務終了は勤務開始より後の時刻にしてください。");
@@ -792,10 +838,12 @@ export default function AttendancePage() {
       return [...others, ...(nextRecords.filter(Boolean) as WorkDayRecord[])];
     });
     setMessage(`${manualMonth} の勤怠を保存しました。`);
+    showSavedNotice("保存しました");
   }
 
   function handleDeleteRecord(recordId: string) {
     if (!adminMode) return;
+    if (!window.confirm("この勤怠記録を削除しますか？")) return;
     setRecords((current) => current.filter((record) => record.id !== recordId));
     setMessage("勤怠記録を削除しました。");
   }
@@ -809,8 +857,8 @@ export default function AttendancePage() {
         record.workDate,
         employee?.name ?? "不明",
         employee?.staffCode ?? "",
-        formatTimeOnly(firstStartAt(record)),
-        record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record)),
+        startDisplay(record),
+        endDisplay(record),
         formatDuration(calculatedBreakMinutes(record)),
         formatDuration(record.totalMinutes),
         formatDuration(record.nightMinutes),
@@ -917,7 +965,7 @@ export default function AttendancePage() {
                 {currentIsWorking ? "勤務終了" : "勤務開始"}
               </button>
 
-              <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-4">
                 <div className="rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">本日の勤務</p>
                   <p className="text-xl font-black">{currentRealtimeRecord ? formatDuration(currentRealtimeRecord.totalMinutes) : "0時間00分"}</p>
@@ -929,6 +977,10 @@ export default function AttendancePage() {
                 <div className="rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">当月の深夜</p>
                   <p className="text-xl font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
+                </div>
+                <div className="rounded-md bg-white p-3">
+                  <p className="font-bold text-stone-500">当月の給与</p>
+                  <p className="text-xl font-black">{currentMonthSummary ? formatYen(currentMonthSummary.pay) : "¥0"}</p>
                 </div>
               </div>
 
@@ -942,7 +994,7 @@ export default function AttendancePage() {
           <section className="grid content-start gap-4">
             {message ? <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{message}</p> : null}
 
-            <nav className="flex gap-2 overflow-x-auto rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:grid sm:grid-cols-5 sm:overflow-visible sm:p-3">
+            <nav className="flex gap-2 overflow-x-auto rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:grid sm:grid-cols-3 sm:overflow-visible sm:p-3">
               {adminMenu.map((item) => (
                 <button className={`h-11 min-w-28 rounded-md px-3 text-sm font-black sm:h-12 sm:min-w-0 ${adminView === item.id ? "bg-stone-900 text-white" : "bg-stone-100 text-stone-700"}`} key={item.id} onClick={() => setAdminView(item.id)} type="button">
                   {item.label}
@@ -951,7 +1003,7 @@ export default function AttendancePage() {
             </nav>
 
             {adminView === "menu" ? (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {adminMenu.map((item) => (
                   <button className="h-24 rounded-lg border border-stone-200 bg-white p-4 text-left text-lg font-black shadow-sm" key={item.id} onClick={() => setAdminView(item.id)} type="button">
                     {item.label}
@@ -1055,7 +1107,7 @@ export default function AttendancePage() {
               </div>
             ) : null}
 
-            {adminView === "add-member" ? (
+            {adminView === "members" ? (
               <form className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm" onSubmit={handleAddEmployee}>
                 <h2 className="text-lg font-black">メンバー追加</h2>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
@@ -1097,11 +1149,15 @@ export default function AttendancePage() {
                         </option>
                       ))}
                     </select>
-                    <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => setManualMonth(event.target.value)} type="month" value={manualMonth} />
+                    <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none lg:hidden" onChange={(event) => {
+                      setManualDate(event.target.value);
+                      setManualMonth(event.target.value.slice(0, 7));
+                    }} type="date" value={manualDate} />
+                    <input className="hidden h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none lg:block" onChange={(event) => setManualMonth(event.target.value)} type="month" value={manualMonth} />
                   </div>
                 </div>
                 <div className="mt-4 grid gap-3 lg:hidden">
-                  {monthDays(manualMonth).map((workDate) => {
+                  {[manualDate].map((workDate) => {
                     const record = manualRecordsByDate.get(workDate);
                     const draft = draftForDay(workDate, record);
                     const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
@@ -1185,8 +1241,11 @@ export default function AttendancePage() {
                     </tbody>
                   </table>
                 </div>
-                <button className="mt-4 h-11 rounded-md bg-emerald-700 px-4 font-black text-white" onClick={saveManualMonth} type="button">
-                  保存
+                <button className="mt-4 h-11 rounded-md bg-emerald-700 px-4 font-black text-white lg:hidden" onClick={saveManualSingleDay} type="button">
+                  {saveNotice || "保存"}
+                </button>
+                <button className="mt-4 hidden h-11 rounded-md bg-emerald-700 px-4 font-black text-white lg:inline-flex lg:items-center lg:justify-center" onClick={saveManualMonth} type="button">
+                  {saveNotice || "保存"}
                 </button>
               </div>
             ) : null}
@@ -1231,11 +1290,11 @@ export default function AttendancePage() {
                           <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                             <div className="rounded-md bg-white px-3 py-2">
                               <p className="text-xs font-bold text-stone-500">勤務開始</p>
-                              <p className="font-black">{formatTimeOnly(firstStartAt(record))}</p>
+                              <p className="font-black">{startDisplay(record)}</p>
                             </div>
                             <div className="rounded-md bg-white px-3 py-2">
                               <p className="text-xs font-bold text-stone-500">勤務終了</p>
-                              <p className="font-black">{record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record))}</p>
+                              <p className="font-black">{endDisplay(record)}</p>
                             </div>
                             <div className="rounded-md bg-white px-3 py-2">
                               <p className="text-xs font-bold text-stone-500">休憩</p>
@@ -1289,8 +1348,8 @@ export default function AttendancePage() {
                             <tr className="border-t border-stone-100" key={record.id}>
                               <td className="px-4 py-3 font-bold">{record.workDate}</td>
                               <td className="px-4 py-3 font-black">{employee?.name ?? "不明"}</td>
-                              <td className="px-4 py-3">{formatTimeOnly(firstStartAt(record))}</td>
-                              <td className="px-4 py-3">{record.status === "missing" ? "未登録" : formatTimeOnly(lastEndAt(record))}</td>
+                              <td className="px-4 py-3">{startDisplay(record)}</td>
+                              <td className="px-4 py-3">{endDisplay(record)}</td>
                               <td className="px-4 py-3">{formatDuration(calculatedBreakMinutes(record))}</td>
                               <td className="px-4 py-3 font-black">{formatDuration(record.totalMinutes)}</td>
                               <td className="px-4 py-3">{formatDuration(record.nightMinutes)}</td>
@@ -1310,7 +1369,7 @@ export default function AttendancePage() {
               </div>
             ) : null}
 
-            {adminView === "summary" ? (
+            {adminView === "records" ? (
               <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="text-lg font-black">月次サマリー</h2>

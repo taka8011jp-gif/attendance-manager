@@ -16,7 +16,7 @@ type Employee = {
   hourlyWage: number;
 };
 
-type WorkStatus = "registered" | "working" | "missing";
+type WorkStatus = "registered" | "working" | "missing" | "off";
 type PunchType = "start" | "end";
 
 type Punch = {
@@ -85,7 +85,7 @@ function normalizeEmployee(employee: Partial<Employee> & { id?: string }, index:
 
 function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employeeId?: string }): WorkDayRecord | null {
   if (!record.id || !record.employeeId || !record.workDate) return null;
-  const status: WorkStatus = record.status === "working" || record.status === "missing" ? record.status : "registered";
+  const status: WorkStatus = record.status === "working" || record.status === "missing" || record.status === "off" ? record.status : "registered";
   const totalMinutes = Number(record.totalMinutes ?? 0);
   const nightMinutes = Number(record.nightMinutes ?? 0);
   const breakMinutes = Number(record.breakMinutes ?? 0);
