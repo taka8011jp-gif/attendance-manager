@@ -89,6 +89,12 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
   const totalMinutes = Number(record.totalMinutes ?? 0);
   const nightMinutes = Number(record.nightMinutes ?? 0);
   const breakMinutes = Number(record.breakMinutes ?? 0);
+  const punches = Array.isArray(record.punches)
+    ? record.punches.filter((punch): punch is Punch => Boolean(punch?.id && (punch.type === "start" || punch.type === "end") && punch.at))
+    : [];
+  if (punches.length === 0 && record.activeStartedAt) {
+    punches.push({ id: `punch-${record.id}`, type: "start", at: record.activeStartedAt });
+  }
 
   return {
     id: record.id,
@@ -99,11 +105,7 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
     breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
-    punches: Array.isArray(record.punches)
-      ? record.punches.filter((punch): punch is Punch => Boolean(punch?.id && (punch.type === "start" || punch.type === "end") && punch.at))
-      : record.activeStartedAt
-        ? [{ id: `punch-${record.id}`, type: "start", at: record.activeStartedAt }]
-        : []
+    punches
   };
 }
 

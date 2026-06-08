@@ -620,15 +620,17 @@ export default function AttendancePage() {
 
   const summaryRows = useMemo(
     () =>
-      employees.map((employee) => {
-        const employeeRecords = records
-          .filter((record) => record.employeeId === employee.id && record.workDate.startsWith(summaryMonth))
-          .map((record) => recordWithRealtime(record, now));
-        const totalMinutes = employeeRecords.reduce((sum, record) => sum + record.totalMinutes, 0);
-        const nightMinutes = employeeRecords.reduce((sum, record) => sum + record.nightMinutes, 0);
-        const pay = monthlyPay(employeeRecords, employee);
-        return { employee, totalMinutes, nightMinutes, pay };
-      }),
+      employees
+        .map((employee) => {
+          const employeeRecords = records
+            .filter((record) => record.employeeId === employee.id && record.workDate.startsWith(summaryMonth))
+            .map((record) => recordWithRealtime(record, now));
+          const totalMinutes = employeeRecords.reduce((sum, record) => sum + record.totalMinutes, 0);
+          const nightMinutes = employeeRecords.reduce((sum, record) => sum + record.nightMinutes, 0);
+          const pay = monthlyPay(employeeRecords, employee);
+          return { employee, totalMinutes, nightMinutes, pay };
+        })
+        .filter((row) => row.totalMinutes > 0),
     [employees, now, records, summaryMonth]
   );
 
@@ -801,10 +803,19 @@ export default function AttendancePage() {
     setMessage(`${employee?.name ?? "メンバー"}さんを削除しました。`);
   }
 
+  function manualDraftKey(workDate: string) {
+    return `${manualEmployeeId}:${workDate}`;
+  }
+
   function draftForDay(workDate: string, record?: WorkDayRecord) {
-    if (manualDrafts[workDate]) return manualDrafts[workDate];
+    const draftKey = manualDraftKey(workDate);
+    if (manualDrafts[draftKey]) return manualDrafts[draftKey];
     if (!record || record.status === "off") return { punches: [] };
-    const punches = sortedPunches(record).map((punch) => ({
+    const recordPunches = sortedPunches(record);
+    if (record.activeStartedAt && !recordPunches.some((punch) => punch.type === "start" && punch.at === record.activeStartedAt)) {
+      recordPunches.push({ id: `punch-active-${record.id}`, type: "start", at: record.activeStartedAt });
+    }
+    const punches = recordPunches.sort((a, b) => a.at.localeCompare(b.at)).map((punch) => ({
       id: punch.id,
       type: punch.type,
       time: formatTimeOnly(punch.at)
@@ -814,9 +825,10 @@ export default function AttendancePage() {
 
   function updateManualPunch(workDate: string, punchId: string, patch: Partial<ManualPunchDraft>) {
     const record = manualRecordsByDate.get(workDate);
+    const draftKey = manualDraftKey(workDate);
     setManualDrafts((current) => ({
       ...current,
-      [workDate]: {
+      [draftKey]: {
         ...draftForDay(workDate, record),
         punches: draftForDay(workDate, record).punches.map((punch) => (punch.id === punchId ? { ...punch, ...patch } : punch))
       }
@@ -826,12 +838,13 @@ export default function AttendancePage() {
   function addManualPunch(workDate: string) {
     const record = manualRecordsByDate.get(workDate);
     const draft = draftForDay(workDate, record);
+    const draftKey = manualDraftKey(workDate);
     const lastPunch = draft.punches[draft.punches.length - 1];
     const nextType: PunchType = lastPunch?.type === "start" ? "end" : "start";
     const defaultTime = lastPunch?.time || (nextType === "start" ? "09:00" : "18:00");
     setManualDrafts((current) => ({
       ...current,
-      [workDate]: {
+      [draftKey]: {
         punches: [...draft.punches, { id: createId("manual-punch"), type: nextType, time: defaultTime }]
       }
     }));
@@ -840,9 +853,10 @@ export default function AttendancePage() {
   function removeManualPunch(workDate: string, punchId: string) {
     const record = manualRecordsByDate.get(workDate);
     const draft = draftForDay(workDate, record);
+    const draftKey = manualDraftKey(workDate);
     setManualDrafts((current) => ({
       ...current,
-      [workDate]: {
+      [draftKey]: {
         punches: draft.punches.filter((punch) => punch.id !== punchId)
       }
     }));
