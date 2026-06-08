@@ -36,6 +36,8 @@ type WorkDayRecord = {
   totalMinutes: number;
   nightMinutes: number;
   breakMinutes: number;
+  payTypeSnapshot?: PayType;
+  payAmountSnapshot?: number;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -303,6 +305,18 @@ function formatYen(value: number) {
   return `¥${Math.round(value).toLocaleString("ja-JP")}`;
 }
 
+function isCurrentWorkMonth(workDate: string, now: Date) {
+  return workDate.slice(0, 7) === businessDate(now).slice(0, 7);
+}
+
+function isPastMonthLocked(month: string, now: Date) {
+  return month < businessDate(now).slice(0, 7) && now.getDate() > 10;
+}
+
+function isWorkDateLocked(workDate: string, now: Date) {
+  return isPastMonthLocked(workDate.slice(0, 7), now);
+}
+
 function employeePayAmount(employee: Employee) {
   const amount = Number(employee.payAmount ?? employee.hourlyWage ?? 0);
   return Number.isFinite(amount) && amount >= 0 ? Math.floor(amount) : 0;
@@ -314,16 +328,27 @@ function payLabel(employee: Employee) {
   return `${label} ${formatYen(employeePayAmount(employee))}`;
 }
 
-function laborCost(record: WorkDayRecord, employee?: Employee) {
-  if (!employee || employee.payType === "monthly") return null;
-  const hourly = employeePayAmount(employee);
+function recordPay(record: WorkDayRecord, employee: Employee, now: Date) {
+  if (isCurrentWorkMonth(record.workDate, now) || record.payTypeSnapshot === undefined) {
+    return { type: employee.payType, amount: employeePayAmount(employee) };
+  }
+  return { type: record.payTypeSnapshot, amount: Math.max(0, Math.floor(Number(record.payAmountSnapshot ?? 0))) };
+}
+
+function laborCost(record: WorkDayRecord, employee: Employee | undefined, now: Date) {
+  if (!employee) return null;
+  const pay = recordPay(record, employee, now);
+  if (pay.type === "monthly") return null;
+  const hourly = pay.amount;
   const regularMinutes = Math.max(0, record.totalMinutes - record.nightMinutes);
   return (regularMinutes / 60) * hourly + (record.nightMinutes / 60) * hourly * 1.25;
 }
 
-function monthlyPay(totalRecords: WorkDayRecord[], employee: Employee) {
-  if (employee.payType === "monthly") return employeePayAmount(employee);
-  return totalRecords.reduce((sum, record) => sum + (laborCost(record, employee) ?? 0), 0);
+function monthlyPay(totalRecords: WorkDayRecord[], employee: Employee, now: Date) {
+  const firstRecord = totalRecords[0];
+  const pay = firstRecord ? recordPay(firstRecord, employee, now) : { type: employee.payType, amount: employeePayAmount(employee) };
+  if (pay.type === "monthly") return pay.amount;
+  return totalRecords.reduce((sum, record) => sum + (laborCost(record, employee, now) ?? 0), 0);
 }
 
 function normalizeEmployee(employee: StoredEmployee, index: number): Employee {
@@ -342,6 +367,20 @@ function normalizeEmployee(employee: StoredEmployee, index: number): Employee {
     payAmount: Number.isFinite(rawAmount) && rawAmount >= 0 ? Math.floor(rawAmount) : Math.floor(oldHourly),
     hourlyWage: Number.isFinite(oldHourly) && oldHourly >= 0 ? Math.floor(oldHourly) : 1200
   };
+}
+
+function fillMissingPaySnapshots(records: WorkDayRecord[], employees: Employee[]) {
+  const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+  return records.map((record) => {
+    if (record.payTypeSnapshot !== undefined) return record;
+    const employee = employeeMap.get(record.employeeId);
+    if (!employee) return record;
+    return {
+      ...record,
+      payTypeSnapshot: employee.payType,
+      payAmountSnapshot: employeePayAmount(employee)
+    };
+  });
 }
 
 function oldBreakMinutes(record: StoredWorkDayRecord) {
@@ -369,6 +408,7 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
   let totalMinutes = Number(record.totalMinutes ?? 0);
   let nightMinutes = Number(record.nightMinutes ?? 0);
   let breakMinutes = Number(record.breakMinutes ?? record.manualBreakMinutes ?? 0);
+  const payAmountSnapshot = Number(record.payAmountSnapshot ?? 0);
   let status: WorkStatus = record.status ?? "registered";
   let punches: Punch[] = Array.isArray(record.punches) ? record.punches : [];
 
@@ -394,6 +434,8 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
     totalMinutes: Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0,
     nightMinutes: Number.isFinite(nightMinutes) ? Math.max(0, Math.floor(nightMinutes)) : 0,
     breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
+    payTypeSnapshot: record.payTypeSnapshot === "monthly" || record.payTypeSnapshot === "hourly" ? record.payTypeSnapshot : undefined,
+    payAmountSnapshot: Number.isFinite(payAmountSnapshot) && payAmountSnapshot >= 0 ? Math.floor(payAmountSnapshot) : undefined,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches
@@ -511,7 +553,7 @@ export default function AttendancePage() {
         const store = (await response.json()) as AttendanceStore;
         if (!isMounted) return;
         const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
-        const normalizedRecords = closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date());
+        const normalizedRecords = fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees);
         setEmployees(normalizedEmployees);
         setRecords(normalizedRecords);
         setManualEmployeeId(normalizedEmployees[0]?.id ?? seedEmployees[0].id);
@@ -542,8 +584,9 @@ export default function AttendancePage() {
         .then((response) => (response.ok ? response.json() : null))
         .then((store: AttendanceStore | null) => {
           if (!store) return;
-          setEmployees((store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee));
-          setRecords(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()));
+          const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
+          setEmployees(normalizedEmployees);
+          setRecords(fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees));
           setDataError("");
         })
         .catch(() => setDataError("共有データとの同期が止まっています。"));
@@ -596,7 +639,7 @@ export default function AttendancePage() {
     return {
       totalMinutes: staffMonthRecords.reduce((sum, record) => sum + record.totalMinutes, 0),
       nightMinutes: staffMonthRecords.reduce((sum, record) => sum + record.nightMinutes, 0),
-      pay: monthlyPay(staffMonthRecords, punchStaff)
+      pay: monthlyPay(staffMonthRecords, punchStaff, now)
     };
   }, [punchStaff, currentWorkDate, records, now]);
 
@@ -627,18 +670,43 @@ export default function AttendancePage() {
             .map((record) => recordWithRealtime(record, now));
           const totalMinutes = employeeRecords.reduce((sum, record) => sum + record.totalMinutes, 0);
           const nightMinutes = employeeRecords.reduce((sum, record) => sum + record.nightMinutes, 0);
-          const pay = monthlyPay(employeeRecords, employee);
-          return { employee, totalMinutes, nightMinutes, pay };
+          const pay = monthlyPay(employeeRecords, employee, now);
+          const payType = employeeRecords[0] ? recordPay(employeeRecords[0], employee, now).type : employee.payType;
+          return { employee, totalMinutes, nightMinutes, pay, payType };
         })
         .filter((row) => row.totalMinutes > 0),
     [employees, now, records, summaryMonth]
   );
 
+  function paySnapshotForEmployee(employee?: Employee) {
+    if (!employee) return {};
+    return {
+      payTypeSnapshot: employee.payType,
+      payAmountSnapshot: employeePayAmount(employee)
+    };
+  }
+
+  function recordForSave(nextRecord: WorkDayRecord, existing?: WorkDayRecord) {
+    const employee = employeeById.get(nextRecord.employeeId);
+    if (isCurrentWorkMonth(nextRecord.workDate, now) || existing?.payTypeSnapshot === undefined) {
+      return { ...nextRecord, ...paySnapshotForEmployee(employee) };
+    }
+    return {
+      ...nextRecord,
+      payTypeSnapshot: existing.payTypeSnapshot,
+      payAmountSnapshot: existing.payAmountSnapshot
+    };
+  }
+
   function upsertRecord(nextRecord: WorkDayRecord) {
     setRecords((current) => {
       const existingIndex = current.findIndex((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate);
-      if (existingIndex >= 0) return current.map((record, index) => (index === existingIndex ? { ...nextRecord, id: record.id } : record));
-      return [nextRecord, ...current];
+      if (existingIndex >= 0) {
+        const existing = current[existingIndex];
+        const savedRecord = recordForSave({ ...nextRecord, id: existing.id }, existing);
+        return current.map((record, index) => (index === existingIndex ? savedRecord : record));
+      }
+      return [recordForSave(nextRecord), ...current];
     });
   }
 
@@ -750,6 +818,17 @@ export default function AttendancePage() {
       return;
     }
 
+    const currentEmployee = employeeById.get(employeeId);
+    const nextEmployee = currentEmployee
+      ? {
+          ...currentEmployee,
+          ...patch,
+          staffCode: patch.staffCode === undefined ? currentEmployee.staffCode : patch.staffCode.trim(),
+          payAmount: patch.payAmount === undefined ? currentEmployee.payAmount : Math.max(0, Math.floor(patch.payAmount)),
+          hourlyWage: patch.payAmount === undefined ? currentEmployee.hourlyWage : Math.max(0, Math.floor(patch.payAmount))
+        }
+      : null;
+
     setEmployees((current) =>
       current.map((employee) =>
         employee.id === employeeId
@@ -763,6 +842,21 @@ export default function AttendancePage() {
           : employee
       )
     );
+
+    if (nextEmployee && (patch.payType !== undefined || patch.payAmount !== undefined)) {
+      const targetMonth = businessDate(now).slice(0, 7);
+      const snapshot = paySnapshotForEmployee(nextEmployee);
+      setRecords((current) =>
+        current.map((record) =>
+          record.employeeId === employeeId && record.workDate.startsWith(targetMonth)
+            ? {
+                ...record,
+                ...snapshot
+              }
+            : record
+        )
+      );
+    }
   }
 
   function handleAddEmployee(event: FormEvent<HTMLFormElement>) {
@@ -938,6 +1032,10 @@ export default function AttendancePage() {
 
   function saveManualSingleDay() {
     if (!adminMode || !manualEmployeeId) return;
+    if (isWorkDateLocked(manualDate, now)) {
+      setMessage("給料日を過ぎた過去月の勤怠は編集できません。");
+      return;
+    }
     const nextRecord = manualRecordFromDraft(manualDate);
     if (!nextRecord) {
       setMessage("勤務終了は勤務開始より後の時刻にしてください。");
@@ -950,6 +1048,10 @@ export default function AttendancePage() {
 
   function saveManualMonth() {
     if (!adminMode || !manualEmployeeId) return;
+    if (isPastMonthLocked(manualMonth, now)) {
+      setMessage("給料日を過ぎた過去月の勤怠は編集できません。");
+      return;
+    }
     const nextRecords = monthDays(manualMonth).map((workDate) => manualRecordFromDraft(workDate));
 
     if (nextRecords.some((record) => record === null)) {
@@ -960,7 +1062,11 @@ export default function AttendancePage() {
     setRecords((current) => {
       const targetDates = new Set(monthDays(manualMonth));
       const others = current.filter((record) => record.employeeId !== manualEmployeeId || !targetDates.has(record.workDate));
-      return [...others, ...(nextRecords.filter(Boolean) as WorkDayRecord[])];
+      const recordsForSave = (nextRecords.filter(Boolean) as WorkDayRecord[]).map((record) => {
+        const existing = current.find((item) => item.employeeId === record.employeeId && item.workDate === record.workDate);
+        return recordForSave(record, existing);
+      });
+      return [...others, ...recordsForSave];
     });
     setMessage(`${manualMonth} の勤怠を保存しました。`);
     showSavedNotice("保存しました");
@@ -968,6 +1074,11 @@ export default function AttendancePage() {
 
   function handleDeleteRecord(recordId: string) {
     if (!adminMode) return;
+    const targetRecord = records.find((record) => record.id === recordId);
+    if (targetRecord && isWorkDateLocked(targetRecord.workDate, now)) {
+      setMessage("給料日を過ぎた過去月の勤怠は削除できません。");
+      return;
+    }
     if (!window.confirm("この勤怠記録を削除しますか？")) return;
     setRecords((current) => current.filter((record) => record.id !== recordId));
     setMessage("勤怠記録を削除しました。");
@@ -977,7 +1088,7 @@ export default function AttendancePage() {
     const rows: Array<Array<string | number>> = [["日付", "氏名", "スタッフコード", "勤務開始", "勤務終了", "休憩時間", "実働時間", "深夜時間", "人件費"]];
     visibleRecords.forEach((record) => {
       const employee = employeeById.get(record.employeeId);
-      const cost = laborCost(record, employee);
+      const cost = laborCost(record, employee, now);
       rows.push([
         record.workDate,
         employee?.name ?? "不明",
@@ -996,7 +1107,7 @@ export default function AttendancePage() {
   function exportSummaryCsv() {
     const rows: Array<Array<string | number>> = [["氏名", "スタッフコード", "給与形態", "勤務時間", "深夜時間", "給与"]];
     summaryRows.forEach((row) => {
-      rows.push([row.employee.name, row.employee.staffCode, row.employee.payType === "monthly" ? "月給" : "時給", formatDuration(row.totalMinutes), formatDuration(row.nightMinutes), Math.round(row.pay)]);
+      rows.push([row.employee.name, row.employee.staffCode, row.payType === "monthly" ? "月給" : "時給", formatDuration(row.totalMinutes), formatDuration(row.nightMinutes), Math.round(row.pay)]);
     });
     exportCsvFile(`attendance-summary-${summaryMonth}.csv`, rows);
   }
@@ -1322,26 +1433,28 @@ export default function AttendancePage() {
                     const record = manualRecordsByDate.get(workDate);
                     const draft = draftForDay(workDate, record);
                     const summary = draftSummary(workDate, draft);
+                    const locked = isWorkDateLocked(workDate, now);
                     return (
                       <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={workDate}>
                         <div className="flex items-center justify-between gap-2">
                           <p className="font-black">{workDate}</p>
-                          <button className="h-9 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => addManualPunch(workDate)} type="button">
+                          <button className={`h-9 rounded-md px-3 text-sm font-black text-white ${locked ? "bg-stone-300" : "bg-stone-900"}`} disabled={locked} onClick={() => addManualPunch(workDate)} type="button">
                             打刻を追加
                           </button>
                         </div>
+                        {locked ? <p className="mt-2 rounded-md bg-white px-3 py-2 text-sm font-bold text-stone-500">給料日を過ぎた過去月のため編集できません。</p> : null}
                         <div className="mt-3 grid gap-2">
                           {draft.punches.length === 0 ? (
                             <p className="rounded-md bg-white px-3 py-3 text-sm font-bold text-stone-500">打刻なし。このまま保存すると休みになります。</p>
                           ) : (
                             draft.punches.map((punch, index) => (
                               <div className="grid grid-cols-[1fr_1fr_auto] gap-2" key={punch.id}>
-                                <select className="h-10 rounded-md border border-stone-300 bg-white px-2 text-sm font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
+                                <select className="h-10 rounded-md border border-stone-300 bg-white px-2 text-sm font-bold outline-none disabled:bg-stone-100 disabled:text-stone-500" disabled={locked} onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
                                   <option value="start">勤務開始</option>
                                   <option value="end">勤務終了</option>
                                 </select>
-                                <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
-                                <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => removeManualPunch(workDate, punch.id)} type="button">
+                                <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none disabled:bg-stone-100 disabled:text-stone-500" disabled={locked} onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
+                                <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700 disabled:bg-stone-100 disabled:text-stone-400" disabled={locked} onClick={() => removeManualPunch(workDate, punch.id)} type="button">
                                   削除
                                 </button>
                               </div>
@@ -1391,6 +1504,7 @@ export default function AttendancePage() {
                         const record = manualRecordsByDate.get(workDate);
                         const draft = draftForDay(workDate, record);
                         const summary = draftSummary(workDate, draft);
+                        const locked = isWorkDateLocked(workDate, now);
                         return (
                           <tr className="border-t border-stone-100 align-top" key={workDate}>
                             <td className="px-4 py-3 font-black">{workDate}</td>
@@ -1401,20 +1515,21 @@ export default function AttendancePage() {
                                 ) : (
                                   draft.punches.map((punch, index) => (
                                     <div className="grid grid-cols-[8rem_7rem_auto] gap-2" key={punch.id}>
-                                      <select className="h-10 rounded-md border border-stone-300 px-2 font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
+                                      <select className="h-10 rounded-md border border-stone-300 px-2 font-bold outline-none disabled:bg-stone-100 disabled:text-stone-500" disabled={locked} onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
                                         <option value="start">勤務開始</option>
                                         <option value="end">勤務終了</option>
                                       </select>
-                                      <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
-                                      <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => removeManualPunch(workDate, punch.id)} type="button">
+                                      <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none disabled:bg-stone-100 disabled:text-stone-500" disabled={locked} onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
+                                      <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700 disabled:bg-stone-100 disabled:text-stone-400" disabled={locked} onClick={() => removeManualPunch(workDate, punch.id)} type="button">
                                         削除
                                       </button>
                                     </div>
                                   ))
                                 )}
-                                <button className="h-9 w-fit rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => addManualPunch(workDate)} type="button">
+                                <button className={`h-9 w-fit rounded-md px-3 text-sm font-black text-white ${locked ? "bg-stone-300" : "bg-stone-900"}`} disabled={locked} onClick={() => addManualPunch(workDate)} type="button">
                                   打刻を追加
                                 </button>
+                                {locked ? <p className="text-sm font-bold text-stone-500">給料日を過ぎた過去月のため編集できません。</p> : null}
                                 {!summary ? <p className="text-sm font-bold text-rose-700">勤務開始と勤務終了の順番を確認してください。</p> : null}
                               </div>
                             </td>
@@ -1428,10 +1543,10 @@ export default function AttendancePage() {
                     </tbody>
                   </table>
                 </div>
-                <button className="mt-4 h-11 rounded-md bg-emerald-700 px-4 font-black text-white lg:hidden" onClick={saveManualSingleDay} type="button">
+                <button className={`mt-4 h-11 rounded-md px-4 font-black text-white lg:hidden ${isWorkDateLocked(manualDate, now) ? "bg-stone-300" : "bg-emerald-700"}`} disabled={isWorkDateLocked(manualDate, now)} onClick={saveManualSingleDay} type="button">
                   {saveNotice || "保存"}
                 </button>
-                <button className="mt-4 hidden h-11 rounded-md bg-emerald-700 px-4 font-black text-white lg:inline-flex lg:items-center lg:justify-center" onClick={saveManualMonth} type="button">
+                <button className={`mt-4 hidden h-11 rounded-md px-4 font-black text-white lg:inline-flex lg:items-center lg:justify-center ${isPastMonthLocked(manualMonth, now) ? "bg-stone-300" : "bg-emerald-700"}`} disabled={isPastMonthLocked(manualMonth, now)} onClick={saveManualMonth} type="button">
                   {saveNotice || "保存"}
                 </button>
               </div>
@@ -1462,7 +1577,7 @@ export default function AttendancePage() {
                   ) : (
                     visibleRecords.map((record) => {
                       const employee = employeeById.get(record.employeeId);
-                      const cost = laborCost(record, employee);
+                      const cost = laborCost(record, employee, now);
                       return (
                         <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={record.id}>
                           <div className="flex items-start justify-between gap-3">
@@ -1470,7 +1585,7 @@ export default function AttendancePage() {
                               <p className="font-black">{record.workDate}</p>
                               <p className="text-sm font-bold text-stone-500">{employee?.name ?? "不明"}</p>
                             </div>
-                            <button className="h-9 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => handleDeleteRecord(record.id)} type="button">
+                            <button className="h-9 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700 disabled:bg-stone-100 disabled:text-stone-400" disabled={isWorkDateLocked(record.workDate, now)} onClick={() => handleDeleteRecord(record.id)} type="button">
                               削除
                             </button>
                           </div>
@@ -1530,7 +1645,7 @@ export default function AttendancePage() {
                       ) : (
                         visibleRecords.map((record) => {
                           const employee = employeeById.get(record.employeeId);
-                          const cost = laborCost(record, employee);
+                          const cost = laborCost(record, employee, now);
                           return (
                             <tr className="border-t border-stone-100" key={record.id}>
                               <td className="px-4 py-3 font-bold">{record.workDate}</td>
@@ -1542,7 +1657,7 @@ export default function AttendancePage() {
                               <td className="px-4 py-3">{formatDuration(record.nightMinutes)}</td>
                               <td className="px-4 py-3 font-black">{cost === null ? "-" : formatYen(cost)}</td>
                               <td className="px-4 py-3">
-                                <button className="h-9 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => handleDeleteRecord(record.id)} type="button">
+                                <button className="h-9 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700 disabled:bg-stone-100 disabled:text-stone-400" disabled={isWorkDateLocked(record.workDate, now)} onClick={() => handleDeleteRecord(record.id)} type="button">
                                   削除
                                 </button>
                               </td>

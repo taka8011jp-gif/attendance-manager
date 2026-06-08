@@ -32,6 +32,8 @@ type WorkDayRecord = {
   totalMinutes: number;
   nightMinutes: number;
   breakMinutes: number;
+  payTypeSnapshot?: PayType;
+  payAmountSnapshot?: number;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -89,6 +91,7 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
   const totalMinutes = Number(record.totalMinutes ?? 0);
   const nightMinutes = Number(record.nightMinutes ?? 0);
   const breakMinutes = Number(record.breakMinutes ?? 0);
+  const payAmountSnapshot = Number(record.payAmountSnapshot ?? 0);
   const punches = Array.isArray(record.punches)
     ? record.punches.filter((punch): punch is Punch => Boolean(punch?.id && (punch.type === "start" || punch.type === "end") && punch.at))
     : [];
@@ -103,10 +106,31 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
     totalMinutes: Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0,
     nightMinutes: Number.isFinite(nightMinutes) ? Math.max(0, Math.floor(nightMinutes)) : 0,
     breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
+    payTypeSnapshot: record.payTypeSnapshot === "monthly" || record.payTypeSnapshot === "hourly" ? record.payTypeSnapshot : undefined,
+    payAmountSnapshot: Number.isFinite(payAmountSnapshot) && payAmountSnapshot >= 0 ? Math.floor(payAmountSnapshot) : undefined,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches
   };
+}
+
+function employeePayAmount(employee: Employee) {
+  const amount = Number(employee.payAmount ?? employee.hourlyWage ?? 0);
+  return Number.isFinite(amount) && amount >= 0 ? Math.floor(amount) : 0;
+}
+
+function fillMissingPaySnapshots(records: WorkDayRecord[], employees: Employee[]) {
+  const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+  return records.map((record) => {
+    if (record.payTypeSnapshot !== undefined) return record;
+    const employee = employeeMap.get(record.employeeId);
+    if (!employee) return record;
+    return {
+      ...record,
+      payTypeSnapshot: employee.payType,
+      payAmountSnapshot: employeePayAmount(employee)
+    };
+  });
 }
 
 function closeExpiredRecords(records: WorkDayRecord[], now: Date) {
@@ -131,7 +155,7 @@ function normalizeStore(store: Partial<AttendanceStore>): AttendanceStore {
 
   return {
     employees,
-    records: closeExpiredRecords(records, new Date())
+    records: fillMissingPaySnapshots(closeExpiredRecords(records, new Date()), employees)
   };
 }
 
