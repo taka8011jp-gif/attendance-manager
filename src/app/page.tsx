@@ -41,6 +41,16 @@ type WorkDayRecord = {
   punches: Punch[];
 };
 
+type ManualPunchDraft = {
+  id: string;
+  type: PunchType;
+  time: string;
+};
+
+type ManualDraft = {
+  punches: ManualPunchDraft[];
+};
+
 type StoredWorkDayRecord = Partial<WorkDayRecord> & {
   id: string;
   employeeId: string;
@@ -192,8 +202,11 @@ function combineWorkDateAndTime(workDate: string, time: string, isEnd = false) {
   const [hours, minutes] = time.split(":").map(Number);
   const date = businessStart(workDate);
   date.setHours(Number.isFinite(hours) ? hours : 0, Number.isFinite(minutes) ? minutes : 0, 0, 0);
-  if (isEnd && date <= businessStart(workDate)) date.setDate(date.getDate() + 1);
-  if (isEnd && hours < 7) date.setDate(date.getDate() + 1);
+  if (Number.isFinite(hours) && hours < 7) {
+    date.setDate(date.getDate() + 1);
+  } else if (isEnd && date <= businessStart(workDate)) {
+    date.setDate(date.getDate() + 1);
+  }
   return localDateTime(date);
 }
 
@@ -220,19 +233,59 @@ function endDisplay(record: WorkDayRecord) {
   return formatTimeOnly(lastEndAt(record));
 }
 
-function calculatedBreakMinutes(record?: WorkDayRecord) {
-  if (!record) return 0;
-  if (Number.isFinite(record.breakMinutes) && record.breakMinutes > 0) return Math.floor(record.breakMinutes);
-  const punches = sortedPunches(record);
+function breakMinutesFromPunches(punches: Punch[]) {
+  const sorted = [...punches].sort((a, b) => a.at.localeCompare(b.at));
   let total = 0;
-  for (let index = 0; index < punches.length - 1; index += 1) {
-    const current = punches[index];
-    const next = punches[index + 1];
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const current = sorted[index];
+    const next = sorted[index + 1];
     if (current.type === "end" && next.type === "start") {
       total += intervalMinutes(parseLocalDateTime(current.at), parseLocalDateTime(next.at));
     }
   }
   return Math.max(0, total);
+}
+
+function workMinutesFromPunches(punches: Punch[]) {
+  const sorted = [...punches].sort((a, b) => a.at.localeCompare(b.at));
+  let total = 0;
+  let activeStart = "";
+  sorted.forEach((punch) => {
+    if (punch.type === "start") {
+      activeStart = punch.at;
+      return;
+    }
+    if (activeStart) {
+      total += intervalMinutes(parseLocalDateTime(activeStart), parseLocalDateTime(punch.at));
+      activeStart = "";
+    }
+  });
+  return Math.max(0, total);
+}
+
+function nightMinutesFromPunches(punches: Punch[]) {
+  const sorted = [...punches].sort((a, b) => a.at.localeCompare(b.at));
+  let total = 0;
+  let activeStart = "";
+  sorted.forEach((punch) => {
+    if (punch.type === "start") {
+      activeStart = punch.at;
+      return;
+    }
+    if (activeStart) {
+      total += nightMinutesBetween(parseLocalDateTime(activeStart), parseLocalDateTime(punch.at));
+      activeStart = "";
+    }
+  });
+  return Math.max(0, total);
+}
+
+function calculatedBreakMinutes(record?: WorkDayRecord) {
+  if (!record) return 0;
+  const fromPunches = breakMinutesFromPunches(record.punches);
+  if (fromPunches > 0) return fromPunches;
+  if (Number.isFinite(record.breakMinutes) && record.breakMinutes > 0) return Math.floor(record.breakMinutes);
+  return 0;
 }
 
 function shiftMinutesFromEndpoints(startAt: string, endAt: string) {
@@ -441,7 +494,7 @@ export default function AttendancePage() {
   const [manualEmployeeId, setManualEmployeeId] = useState(seedEmployees[0].id);
   const [manualMonth, setManualMonth] = useState(currentMonth());
   const [manualDate, setManualDate] = useState(businessDate(new Date()));
-  const [manualDrafts, setManualDrafts] = useState<Record<string, { startTime: string; endTime: string; breakMinutes: string }>>({});
+  const [manualDrafts, setManualDrafts] = useState<Record<string, ManualDraft>>({});
   const [recordEmployeeId, setRecordEmployeeId] = useState("all");
   const [recordMonth, setRecordMonth] = useState(currentMonth());
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
@@ -650,16 +703,17 @@ export default function AttendancePage() {
     const existing = records.find((record) => record.employeeId === punchStaff.id && record.workDate === workDate);
 
     if (!existing || existing.status !== "working" || !existing.activeStartedAt) {
+      const nextPunches = [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start" as const, at: timestampText }];
       upsertRecord({
         id: existing?.id ?? createId("work-day"),
         employeeId: punchStaff.id,
         workDate,
         totalMinutes: existing?.status === "missing" ? 0 : existing?.totalMinutes ?? 0,
         nightMinutes: existing?.status === "missing" ? 0 : existing?.nightMinutes ?? 0,
-        breakMinutes: existing?.status === "missing" ? 0 : calculatedBreakMinutes(existing),
+        breakMinutes: existing?.status === "missing" ? 0 : breakMinutesFromPunches(nextPunches),
         activeStartedAt: timestampText,
         status: "working",
-        punches: [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start", at: timestampText }]
+        punches: nextPunches
       });
       setMessage("勤務開始を記録しました。");
       return;
@@ -748,32 +802,95 @@ export default function AttendancePage() {
   }
 
   function draftForDay(workDate: string, record?: WorkDayRecord) {
-    return (
-      manualDrafts[workDate] ?? {
-        startTime: record?.status === "off" || !record ? "" : formatTimeOnly(firstStartAt(record) || defaultStartAt(workDate)),
-        endTime: record?.status === "missing" || record?.status === "off" || !record ? "" : formatTimeOnly(lastEndAt(record) || defaultEndAt(workDate)),
-        breakMinutes: minutesToTimeInput(calculatedBreakMinutes(record))
-      }
-    );
+    if (manualDrafts[workDate]) return manualDrafts[workDate];
+    if (!record || record.status === "off") return { punches: [] };
+    const punches = sortedPunches(record).map((punch) => ({
+      id: punch.id,
+      type: punch.type,
+      time: formatTimeOnly(punch.at)
+    }));
+    return { punches };
   }
 
-  function updateManualDraft(workDate: string, patch: Partial<{ startTime: string; endTime: string; breakMinutes: string }>) {
+  function updateManualPunch(workDate: string, punchId: string, patch: Partial<ManualPunchDraft>) {
     const record = manualRecordsByDate.get(workDate);
     setManualDrafts((current) => ({
       ...current,
       [workDate]: {
         ...draftForDay(workDate, record),
-        ...patch
+        punches: draftForDay(workDate, record).punches.map((punch) => (punch.id === punchId ? { ...punch, ...patch } : punch))
       }
     }));
+  }
+
+  function addManualPunch(workDate: string) {
+    const record = manualRecordsByDate.get(workDate);
+    const draft = draftForDay(workDate, record);
+    const lastPunch = draft.punches[draft.punches.length - 1];
+    const nextType: PunchType = lastPunch?.type === "start" ? "end" : "start";
+    const defaultTime = lastPunch?.time || (nextType === "start" ? "09:00" : "18:00");
+    setManualDrafts((current) => ({
+      ...current,
+      [workDate]: {
+        punches: [...draft.punches, { id: createId("manual-punch"), type: nextType, time: defaultTime }]
+      }
+    }));
+  }
+
+  function removeManualPunch(workDate: string, punchId: string) {
+    const record = manualRecordsByDate.get(workDate);
+    const draft = draftForDay(workDate, record);
+    setManualDrafts((current) => ({
+      ...current,
+      [workDate]: {
+        punches: draft.punches.filter((punch) => punch.id !== punchId)
+      }
+    }));
+  }
+
+  function punchesFromDraft(workDate: string, draft: ManualDraft) {
+    const punches = draft.punches
+      .filter((punch) => punch.time)
+      .map((punch) => ({
+        id: punch.id,
+        type: punch.type,
+        at: combineWorkDateAndTime(workDate, punch.time, punch.type === "end")
+      }))
+      .sort((a, b) => a.at.localeCompare(b.at));
+
+    let openStart = "";
+    for (const punch of punches) {
+      if (punch.type === "start") {
+        if (openStart) return null;
+        openStart = punch.at;
+      } else {
+        if (!openStart || parseLocalDateTime(punch.at) <= parseLocalDateTime(openStart)) return null;
+        openStart = "";
+      }
+    }
+
+    return punches;
+  }
+
+  function draftSummary(workDate: string, draft: ManualDraft) {
+    const punches = punchesFromDraft(workDate, draft);
+    if (!punches) return null;
+    return {
+      punches,
+      breakMinutes: breakMinutesFromPunches(punches),
+      totalMinutes: workMinutesFromPunches(punches),
+      nightMinutes: nightMinutesFromPunches(punches),
+      status: punches.length === 0 ? ("off" as const) : punches[punches.length - 1].type === "start" ? ("missing" as const) : ("registered" as const)
+    };
   }
 
   function manualRecordFromDraft(workDate: string) {
     const existing = manualRecordsByDate.get(workDate);
     const draft = draftForDay(workDate, existing);
-    const breakMinutes = timeInputToMinutes(draft.breakMinutes);
+    const summary = draftSummary(workDate, draft);
+    if (!summary) return null;
 
-    if (!draft.startTime && !draft.endTime) {
+    if (summary.status === "off") {
       return {
         id: existing?.id ?? createId("work-day"),
         employeeId: manualEmployeeId,
@@ -787,36 +904,16 @@ export default function AttendancePage() {
       };
     }
 
-    if (!draft.endTime) {
-      return {
-        id: existing?.id ?? createId("work-day"),
-        employeeId: manualEmployeeId,
-        workDate,
-        totalMinutes: 0,
-        nightMinutes: 0,
-        breakMinutes: 0,
-        activeStartedAt: null,
-        status: "missing" as const,
-        punches: draft.startTime ? [{ id: createId("punch"), type: "start" as const, at: combineWorkDateAndTime(workDate, draft.startTime) }] : []
-      };
-    }
-
-    const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
-    const endAt = combineWorkDateAndTime(workDate, draft.endTime, true);
-    const start = parseLocalDateTime(startAt);
-    const end = parseLocalDateTime(endAt);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
-
     return {
       id: existing?.id ?? createId("work-day"),
       employeeId: manualEmployeeId,
       workDate,
-      totalMinutes: Math.max(0, intervalMinutes(start, end) - breakMinutes),
-      nightMinutes: nightMinutesBetween(start, end),
-      breakMinutes,
+      totalMinutes: summary.totalMinutes,
+      nightMinutes: summary.nightMinutes,
+      breakMinutes: summary.breakMinutes,
       activeStartedAt: null,
-      status: "registered" as const,
-      punches: buildPunches(workDate, startAt, endAt)
+      status: summary.status,
+      punches: summary.punches
     };
   }
 
@@ -1210,81 +1307,107 @@ export default function AttendancePage() {
                   {[manualDate].map((workDate) => {
                     const record = manualRecordsByDate.get(workDate);
                     const draft = draftForDay(workDate, record);
-                    const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
-                    const endAt = draft.endTime ? combineWorkDateAndTime(workDate, draft.endTime, true) : "";
-                    const breakMinutes = timeInputToMinutes(draft.breakMinutes);
-                    const shiftMinutes = endAt ? shiftMinutesFromEndpoints(startAt, endAt) : 0;
-                    const actualMinutes = endAt ? actualMinutesFromDraft(startAt, endAt, breakMinutes) : 0;
+                    const summary = draftSummary(workDate, draft);
                     return (
                       <div className="rounded-md border border-stone-200 bg-stone-50 p-3" key={workDate}>
-                        <p className="font-black">{workDate}</p>
-                        <div className="mt-3 grid grid-cols-2 gap-2">
-                          <label className="grid gap-1 text-xs font-bold text-stone-500">
-                            勤務開始
-                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { startTime: event.target.value })} type="time" value={draft.startTime} />
-                          </label>
-                          <label className="grid gap-1 text-xs font-bold text-stone-500">
-                            勤務終了
-                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { endTime: event.target.value })} type="time" value={draft.endTime} />
-                          </label>
-                          <label className="grid gap-1 text-xs font-bold text-stone-500">
-                            休憩時間
-                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { breakMinutes: event.target.value })} type="time" value={draft.breakMinutes} />
-                          </label>
-                          <div className="grid gap-1 rounded-md bg-white px-3 py-2 text-xs font-bold text-stone-500">
-                            実働時間
-                            <span className="text-base font-black text-stone-950">{endAt ? formatDuration(actualMinutes) : "-"}</span>
-                          </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-black">{workDate}</p>
+                          <button className="h-9 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => addManualPunch(workDate)} type="button">
+                            打刻を追加
+                          </button>
                         </div>
-                        <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                          <div className="rounded-md bg-white px-3 py-2">
-                            <p className="text-xs font-bold text-stone-500">勤務時間</p>
-                            <p className="font-black">{endAt ? formatDuration(shiftMinutes) : "未登録"}</p>
-                          </div>
-                          <div className="rounded-md bg-white px-3 py-2">
-                            <p className="text-xs font-bold text-stone-500">深夜時間</p>
-                            <p className="font-black">{record ? formatDuration(recordWithRealtime(record, now).nightMinutes) : "0時間00分"}</p>
-                          </div>
+                        <div className="mt-3 grid gap-2">
+                          {draft.punches.length === 0 ? (
+                            <p className="rounded-md bg-white px-3 py-3 text-sm font-bold text-stone-500">打刻なし。このまま保存すると休みになります。</p>
+                          ) : (
+                            draft.punches.map((punch, index) => (
+                              <div className="grid grid-cols-[1fr_1fr_auto] gap-2" key={punch.id}>
+                                <select className="h-10 rounded-md border border-stone-300 bg-white px-2 text-sm font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
+                                  <option value="start">勤務開始</option>
+                                  <option value="end">勤務終了</option>
+                                </select>
+                                <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
+                                <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => removeManualPunch(workDate, punch.id)} type="button">
+                                  削除
+                                </button>
+                              </div>
+                            ))
+                          )}
                         </div>
+                        {summary ? (
+                          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">勤務時間</p>
+                              <p className="font-black">{formatDuration(summary.totalMinutes + summary.breakMinutes)}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">休憩時間</p>
+                              <p className="font-black">{formatDuration(summary.breakMinutes)}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">実働時間</p>
+                              <p className="font-black">{formatDuration(summary.totalMinutes)}</p>
+                            </div>
+                            <div className="rounded-md bg-white px-3 py-2">
+                              <p className="text-xs font-bold text-stone-500">深夜時間</p>
+                              <p className="font-black">{formatDuration(summary.nightMinutes)}</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">勤務開始と勤務終了の順番を確認してください。</p>
+                        )}
                       </div>
                     );
                   })}
                 </div>
                 <div className="mt-4 hidden overflow-x-auto lg:block">
-                  <table className="w-full min-w-[980px] border-collapse text-left text-sm">
+                  <table className="w-full min-w-[1100px] border-collapse text-left text-sm">
                     <thead className="bg-stone-100 text-xs font-black text-stone-600">
                       <tr>
                         <th className="px-4 py-3">日付</th>
-                        <th className="px-4 py-3">勤務開始</th>
-                        <th className="px-4 py-3">勤務終了</th>
+                        <th className="px-4 py-3">打刻履歴</th>
                         <th className="px-4 py-3">勤務時間</th>
                         <th className="px-4 py-3">休憩時間</th>
                         <th className="px-4 py-3">実働時間</th>
+                        <th className="px-4 py-3">深夜時間</th>
                       </tr>
                     </thead>
                     <tbody>
                       {monthDays(manualMonth).map((workDate) => {
                         const record = manualRecordsByDate.get(workDate);
                         const draft = draftForDay(workDate, record);
-                        const startAt = combineWorkDateAndTime(workDate, draft.startTime || "09:00");
-                        const endAt = draft.endTime ? combineWorkDateAndTime(workDate, draft.endTime, true) : "";
-                        const breakMinutes = timeInputToMinutes(draft.breakMinutes);
-                        const shiftMinutes = endAt ? shiftMinutesFromEndpoints(startAt, endAt) : 0;
-                        const actualMinutes = endAt ? actualMinutesFromDraft(startAt, endAt, breakMinutes) : 0;
+                        const summary = draftSummary(workDate, draft);
                         return (
-                          <tr className="border-t border-stone-100" key={workDate}>
+                          <tr className="border-t border-stone-100 align-top" key={workDate}>
                             <td className="px-4 py-3 font-black">{workDate}</td>
                             <td className="px-4 py-3">
-                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { startTime: event.target.value })} type="time" value={draft.startTime} />
+                              <div className="grid gap-2">
+                                {draft.punches.length === 0 ? (
+                                  <p className="text-sm font-bold text-stone-500">休み</p>
+                                ) : (
+                                  draft.punches.map((punch, index) => (
+                                    <div className="grid grid-cols-[8rem_7rem_auto] gap-2" key={punch.id}>
+                                      <select className="h-10 rounded-md border border-stone-300 px-2 font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
+                                        <option value="start">勤務開始</option>
+                                        <option value="end">勤務終了</option>
+                                      </select>
+                                      <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualPunch(workDate, punch.id, { time: event.target.value })} type="time" value={punch.time} />
+                                      <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => removeManualPunch(workDate, punch.id)} type="button">
+                                        削除
+                                      </button>
+                                    </div>
+                                  ))
+                                )}
+                                <button className="h-9 w-fit rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => addManualPunch(workDate)} type="button">
+                                  打刻を追加
+                                </button>
+                                {!summary ? <p className="text-sm font-bold text-rose-700">勤務開始と勤務終了の順番を確認してください。</p> : null}
+                              </div>
                             </td>
-                            <td className="px-4 py-3">
-                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { endTime: event.target.value })} type="time" value={draft.endTime} />
-                            </td>
-                            <td className="px-4 py-3">{endAt ? formatDuration(shiftMinutes) : "未登録"}</td>
-                            <td className="px-4 py-3">
-                              <input className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateManualDraft(workDate, { breakMinutes: event.target.value })} type="time" value={draft.breakMinutes} />
-                            </td>
-                            <td className="px-4 py-3 font-black">{endAt ? formatDuration(actualMinutes) : "-"}</td>
+                            <td className="px-4 py-3">{summary ? formatDuration(summary.totalMinutes + summary.breakMinutes) : "-"}</td>
+                            <td className="px-4 py-3">{summary ? formatDuration(summary.breakMinutes) : "-"}</td>
+                            <td className="px-4 py-3 font-black">{summary ? formatDuration(summary.totalMinutes) : "-"}</td>
+                            <td className="px-4 py-3">{summary ? formatDuration(summary.nightMinutes) : "-"}</td>
                           </tr>
                         );
                       })}
