@@ -444,14 +444,25 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
 }
 
 function recordWithRealtime(record: WorkDayRecord, now: Date) {
-  if (!record.activeStartedAt || record.status !== "working") return record;
-  const startedAt = parseLocalDateTime(record.activeStartedAt);
+  const activeStartedAt = activeStartAtForRecord(record, now);
+  if (!activeStartedAt) return record;
+  const startedAt = parseLocalDateTime(activeStartedAt);
   const cappedNow = new Date(Math.min(now.getTime(), businessEnd(record.workDate).getTime()));
   return {
     ...record,
+    activeStartedAt,
+    status: "working" as const,
     totalMinutes: record.totalMinutes + intervalMinutes(startedAt, cappedNow),
     nightMinutes: record.nightMinutes + nightMinutesBetween(startedAt, cappedNow)
   };
+}
+
+function activeStartAtForRecord(record: WorkDayRecord | null | undefined, now: Date) {
+  if (!record) return "";
+  if (record.status === "working" && record.activeStartedAt) return record.activeStartedAt;
+  if (record.workDate !== businessDate(now)) return "";
+  const lastPunch = sortedPunches(record).at(-1);
+  return lastPunch?.type === "start" ? lastPunch.at : "";
 }
 
 function closeExpiredRecords(records: WorkDayRecord[], now: Date) {
@@ -652,7 +663,7 @@ export default function AttendancePage() {
   const currentWorkDate = businessDate(now);
   const currentRecord = punchStaff ? records.find((record) => record.employeeId === punchStaff.id && record.workDate === currentWorkDate) : null;
   const currentRealtimeRecord = currentRecord ? recordWithRealtime(currentRecord, now) : null;
-  const currentIsWorking = currentRecord?.status === "working" && Boolean(currentRecord.activeStartedAt);
+  const currentIsWorking = Boolean(activeStartAtForRecord(currentRecord, now));
 
   const currentMonthSummary = useMemo(() => {
     if (!punchStaff) return null;
@@ -794,8 +805,9 @@ export default function AttendancePage() {
     const timestampText = localDateTime(timestamp);
     const workDate = businessDate(timestamp);
     const existing = records.find((record) => record.employeeId === punchStaff.id && record.workDate === workDate);
+    const existingActiveStartedAt = activeStartAtForRecord(existing, timestamp);
 
-    if (!existing || existing.status !== "working" || !existing.activeStartedAt) {
+    if (!existing || !existingActiveStartedAt) {
       const nextPunches = [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start" as const, at: timestampText }];
       upsertRecord({
         id: existing?.id ?? createId("work-day"),
@@ -812,7 +824,7 @@ export default function AttendancePage() {
       return;
     }
 
-    const startedAt = parseLocalDateTime(existing.activeStartedAt);
+    const startedAt = parseLocalDateTime(existingActiveStartedAt);
     const endAt = new Date(Math.min(timestamp.getTime(), businessEnd(existing.workDate).getTime()));
     const endText = localDateTime(endAt);
     const nextPunches = [...existing.punches, { id: createId("punch"), type: "end" as const, at: endText }];
