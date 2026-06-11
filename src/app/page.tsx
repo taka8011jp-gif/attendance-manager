@@ -74,6 +74,7 @@ type AdminView = "menu" | "members" | "add-member" | "manual" | "records" | "sum
 
 const DEFAULT_ADMIN_CODE = "0622";
 const DEVELOPER_CODE = "19788011";
+const SYNC_INTERVAL_MS = 5000;
 
 const seedEmployees: Employee[] = [
   { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "hourly", payAmount: 1500 },
@@ -542,6 +543,7 @@ export default function AttendancePage() {
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
   const [saveNotice, setSaveNotice] = useState("");
   const hasLoadedStore = useRef(false);
+  const hasPendingSave = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -575,27 +577,45 @@ export default function AttendancePage() {
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    async function refreshSharedStore() {
+      if (hasPendingSave.current) return;
+      try {
+        const response = await fetch("/api/attendance", { cache: "no-store" });
+        if (!response.ok) return;
+        const store = (await response.json()) as AttendanceStore;
+        const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
+        setEmployees(normalizedEmployees);
+        setRecords(fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees));
+        setDataError("");
+      } catch {
+        setDataError("共有データとの同期が止まっています。");
+      }
+    }
+
+    const refreshNow = () => {
       const current = new Date();
       setNow(current);
       setRecords((existing) => closeExpiredRecords(existing, current));
+      void refreshSharedStore();
+    };
 
-      void fetch("/api/attendance", { cache: "no-store" })
-        .then((response) => (response.ok ? response.json() : null))
-        .then((store: AttendanceStore | null) => {
-          if (!store) return;
-          const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
-          setEmployees(normalizedEmployees);
-          setRecords(fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees));
-          setDataError("");
-        })
-        .catch(() => setDataError("共有データとの同期が止まっています。"));
-    }, 30000);
-    return () => window.clearInterval(timer);
+    const refreshOnFocus = () => {
+      if (!document.hidden) refreshNow();
+    };
+
+    const timer = window.setInterval(refreshNow, SYNC_INTERVAL_MS);
+    window.addEventListener("focus", refreshNow);
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshNow);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+    };
   }, []);
 
   useEffect(() => {
     if (!hasLoadedStore.current) return;
+    hasPendingSave.current = true;
     const controller = new AbortController();
     const saveTimer = window.setTimeout(() => {
       setIsSaving(true);
@@ -613,7 +633,10 @@ export default function AttendancePage() {
           if (error instanceof DOMException && error.name === "AbortError") return;
           setDataError("共有データを保存できません。Vercelの環境変数とSupabaseを確認してください。");
         })
-        .finally(() => setIsSaving(false));
+        .finally(() => {
+          hasPendingSave.current = false;
+          setIsSaving(false);
+        });
     }, 250);
 
     return () => {
@@ -997,6 +1020,9 @@ export default function AttendancePage() {
     const draft = draftForDay(workDate, existing);
     const summary = draftSummary(workDate, draft);
     if (!summary) return null;
+    const isOpenCurrentWorkDate = summary.status === "missing" && workDate === businessDate(now);
+    const activeStartedAt = isOpenCurrentWorkDate ? summary.punches[summary.punches.length - 1]?.at ?? null : null;
+    const status = isOpenCurrentWorkDate ? ("working" as const) : summary.status;
 
     if (summary.status === "off") {
       return {
@@ -1019,8 +1045,8 @@ export default function AttendancePage() {
       totalMinutes: summary.totalMinutes,
       nightMinutes: summary.nightMinutes,
       breakMinutes: summary.breakMinutes,
-      activeStartedAt: null,
-      status: summary.status,
+      activeStartedAt,
+      status,
       punches: summary.punches
     };
   }
