@@ -553,8 +553,11 @@ export default function AttendancePage() {
   const [recordMonth, setRecordMonth] = useState(currentMonth());
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
   const [saveNotice, setSaveNotice] = useState("");
+  const [isPunchSaving, setIsPunchSaving] = useState(false);
   const hasLoadedStore = useRef(false);
   const hasPendingSave = useRef(false);
+  const skipNextAutoSave = useRef(false);
+  const punchSavingRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -626,6 +629,10 @@ export default function AttendancePage() {
 
   useEffect(() => {
     if (!hasLoadedStore.current) return;
+    if (skipNextAutoSave.current) {
+      skipNextAutoSave.current = false;
+      return;
+    }
     hasPendingSave.current = true;
     const controller = new AbortController();
     const saveTimer = window.setTimeout(() => {
@@ -732,16 +739,102 @@ export default function AttendancePage() {
     };
   }
 
+  function upsertRecordList(current: WorkDayRecord[], nextRecord: WorkDayRecord) {
+    const existingIndex = current.findIndex((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate);
+    if (existingIndex >= 0) {
+      const existing = current[existingIndex];
+      const savedRecord = recordForSave({ ...nextRecord, id: existing.id }, existing);
+      return current.map((record, index) => (index === existingIndex ? savedRecord : record));
+    }
+    return [recordForSave(nextRecord), ...current];
+  }
+
   function upsertRecord(nextRecord: WorkDayRecord) {
-    setRecords((current) => {
-      const existingIndex = current.findIndex((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate);
-      if (existingIndex >= 0) {
-        const existing = current[existingIndex];
-        const savedRecord = recordForSave({ ...nextRecord, id: existing.id }, existing);
-        return current.map((record, index) => (index === existingIndex ? savedRecord : record));
-      }
-      return [recordForSave(nextRecord), ...current];
-    });
+    setRecords((current) => upsertRecordList(current, nextRecord));
+  }
+
+  async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[]) {
+    hasPendingSave.current = true;
+    setIsSaving(true);
+    try {
+      const response = await fetch("/api/attendance", {
+        body: JSON.stringify({ employees: nextEmployees, records: nextRecords }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST"
+      });
+      if (!response.ok) throw new Error("保存できませんでした。");
+      setDataError("");
+    } finally {
+      hasPendingSave.current = false;
+      setIsSaving(false);
+    }
+  }
+
+  function savePunchRecord(nextRecord: WorkDayRecord, successMessage: string) {
+    const nextRecords = upsertRecordList(records, nextRecord);
+    setMessage("保存中です...");
+
+    return saveSharedStoreImmediately(employees, nextRecords)
+      .then(() => {
+        skipNextAutoSave.current = true;
+        setRecords(nextRecords);
+        setMessage(successMessage);
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+        throw new Error("Punch save failed");
+      });
+  }
+
+  async function withPunchSaveLock(action: () => Promise<void>) {
+    if (punchSavingRef.current) return;
+    punchSavingRef.current = true;
+    setIsPunchSaving(true);
+    try {
+      await action();
+    } finally {
+      punchSavingRef.current = false;
+      setIsPunchSaving(false);
+    }
+  }
+
+  function handlePunchSaveError(error: unknown) {
+    if (error instanceof Error && error.message === "Punch save failed") return;
+    setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+    setMessage("保存できませんでした。もう一度押してください。");
+  }
+
+  function buildStartRecord(existing: WorkDayRecord | undefined, punchStaffId: string, workDate: string, timestampText: string) {
+    const nextPunches = [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start" as const, at: timestampText }];
+    return {
+      id: existing?.id ?? createId("work-day"),
+      employeeId: punchStaffId,
+      workDate,
+      totalMinutes: existing?.status === "missing" ? 0 : existing?.totalMinutes ?? 0,
+      nightMinutes: existing?.status === "missing" ? 0 : existing?.nightMinutes ?? 0,
+      breakMinutes: existing?.status === "missing" ? 0 : breakMinutesFromPunches(nextPunches),
+      activeStartedAt: timestampText,
+      status: "working" as const,
+      punches: nextPunches
+    };
+  }
+
+  function buildEndRecord(existing: WorkDayRecord, existingActiveStartedAt: string, timestamp: Date) {
+    const startedAt = parseLocalDateTime(existingActiveStartedAt);
+    const endAt = new Date(Math.min(timestamp.getTime(), businessEnd(existing.workDate).getTime()));
+    const endText = localDateTime(endAt);
+    const nextPunches = [...existing.punches, { id: createId("punch"), type: "end" as const, at: endText }];
+    const nextRecord = { ...existing, punches: nextPunches };
+    return {
+      ...existing,
+      totalMinutes: existing.totalMinutes + intervalMinutes(startedAt, endAt),
+      nightMinutes: existing.nightMinutes + nightMinutesBetween(startedAt, endAt),
+      breakMinutes: calculatedBreakMinutes(nextRecord),
+      activeStartedAt: null,
+      status: "registered" as const,
+      punches: nextPunches
+    };
   }
 
   function findEmployeeByCode(code: string) {
@@ -801,44 +894,24 @@ export default function AttendancePage() {
 
   function handleWorkToggle() {
     if (!punchStaff) return;
-    const timestamp = new Date();
-    const timestampText = localDateTime(timestamp);
-    const workDate = businessDate(timestamp);
-    const existing = records.find((record) => record.employeeId === punchStaff.id && record.workDate === workDate);
-    const existingActiveStartedAt = activeStartAtForRecord(existing, timestamp);
+    void withPunchSaveLock(async () => {
+      try {
+        const timestamp = new Date();
+        const timestampText = localDateTime(timestamp);
+        const workDate = businessDate(timestamp);
+        const existing = records.find((record) => record.employeeId === punchStaff.id && record.workDate === workDate);
+        const existingActiveStartedAt = activeStartAtForRecord(existing, timestamp);
 
-    if (!existing || !existingActiveStartedAt) {
-      const nextPunches = [...(existing?.status === "missing" ? [] : existing?.punches ?? []), { id: createId("punch"), type: "start" as const, at: timestampText }];
-      upsertRecord({
-        id: existing?.id ?? createId("work-day"),
-        employeeId: punchStaff.id,
-        workDate,
-        totalMinutes: existing?.status === "missing" ? 0 : existing?.totalMinutes ?? 0,
-        nightMinutes: existing?.status === "missing" ? 0 : existing?.nightMinutes ?? 0,
-        breakMinutes: existing?.status === "missing" ? 0 : breakMinutesFromPunches(nextPunches),
-        activeStartedAt: timestampText,
-        status: "working",
-        punches: nextPunches
-      });
-      setMessage("勤務開始を記録しました。");
-      return;
-    }
+        if (!existing || !existingActiveStartedAt) {
+          await savePunchRecord(buildStartRecord(existing, punchStaff.id, workDate, timestampText), "勤務開始を記録しました。");
+          return;
+        }
 
-    const startedAt = parseLocalDateTime(existingActiveStartedAt);
-    const endAt = new Date(Math.min(timestamp.getTime(), businessEnd(existing.workDate).getTime()));
-    const endText = localDateTime(endAt);
-    const nextPunches = [...existing.punches, { id: createId("punch"), type: "end" as const, at: endText }];
-    const nextRecord = { ...existing, punches: nextPunches };
-    upsertRecord({
-      ...existing,
-      totalMinutes: existing.totalMinutes + intervalMinutes(startedAt, endAt),
-      nightMinutes: existing.nightMinutes + nightMinutesBetween(startedAt, endAt),
-      breakMinutes: calculatedBreakMinutes(nextRecord),
-      activeStartedAt: null,
-      status: "registered",
-      punches: nextPunches
+        await savePunchRecord(buildEndRecord(existing, existingActiveStartedAt, timestamp), "勤務終了を記録しました。");
+      } catch (error) {
+        handlePunchSaveError(error);
+      }
     });
-    setMessage("勤務終了を記録しました。");
   }
 
   function updateEmployee(employeeId: string, patch: Partial<Employee>) {
@@ -1235,8 +1308,8 @@ export default function AttendancePage() {
             </div>
 
             <div className="mt-4 grid gap-3 rounded-md bg-stone-50 p-4">
-              <button className={`h-16 rounded-md px-4 text-xl font-black text-white shadow-sm ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} onClick={handleWorkToggle} type="button">
-                {currentIsWorking ? "勤務終了" : "勤務開始"}
+              <button className={`h-16 rounded-md px-4 text-xl font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60 ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} disabled={isPunchSaving} onClick={handleWorkToggle} type="button">
+                {isPunchSaving ? "保存中..." : currentIsWorking ? "勤務終了" : "勤務開始"}
               </button>
 
               <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-4">
@@ -1280,8 +1353,8 @@ export default function AttendancePage() {
                   </span>
                 </div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(180px,240px)_1fr] sm:items-stretch">
-                  <button className={`h-14 rounded-md px-4 text-lg font-black text-white shadow-sm ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} onClick={handleWorkToggle} type="button">
-                    {currentIsWorking ? "勤務終了" : "勤務開始"}
+                  <button className={`h-14 rounded-md px-4 text-lg font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60 ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} disabled={isPunchSaving} onClick={handleWorkToggle} type="button">
+                    {isPunchSaving ? "保存中..." : currentIsWorking ? "勤務終了" : "勤務開始"}
                   </button>
                   <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-3">
                     <div className="rounded-md bg-stone-50 p-3">
