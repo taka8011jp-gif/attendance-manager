@@ -836,9 +836,15 @@ export default function AttendancePage() {
       .then(async () => {
         setMessage("共有データを確認しています...");
         const confirmedStore = await waitForSharedRecord(expectedRecord);
+        const confirmedRecord = confirmedStore.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
+        const draftKey = manualDraftKeyFor(expectedRecord.employeeId, expectedRecord.workDate);
         skipNextAutoSave.current = true;
         setEmployees(confirmedStore.employees);
         setRecords(confirmedStore.records);
+        setManualDrafts((current) => ({
+          ...current,
+          [draftKey]: draftFromRecord(confirmedRecord ?? expectedRecord)
+        }));
         setMessage(successMessage);
       })
       .catch(() => {
@@ -1074,9 +1080,7 @@ export default function AttendancePage() {
     return `${employeeId}:${workDate}`;
   }
 
-  function draftForEmployeeDay(employeeId: string, workDate: string, record?: WorkDayRecord) {
-    const draftKey = manualDraftKeyFor(employeeId, workDate);
-    if (manualDrafts[draftKey]) return manualDrafts[draftKey];
+  function draftFromRecord(record?: WorkDayRecord): ManualDraft {
     if (!record || record.status === "off") return { punches: [] };
     const recordPunches = sortedPunches(record);
     if (record.activeStartedAt && !recordPunches.some((punch) => punch.type === "start" && punch.at === record.activeStartedAt)) {
@@ -1088,6 +1092,12 @@ export default function AttendancePage() {
       time: formatTimeOnly(punch.at)
     }));
     return { punches };
+  }
+
+  function draftForEmployeeDay(employeeId: string, workDate: string, record?: WorkDayRecord) {
+    const draftKey = manualDraftKeyFor(employeeId, workDate);
+    if (manualDrafts[draftKey]) return manualDrafts[draftKey];
+    return draftFromRecord(record);
   }
 
   function draftForDay(workDate: string, record?: WorkDayRecord) {
