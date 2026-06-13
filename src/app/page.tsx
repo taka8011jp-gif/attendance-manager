@@ -1480,7 +1480,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{formatDuration(row.totalMinutes)}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.totalMinutes > 0 ? formatDuration(row.totalMinutes) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1509,7 +1509,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{row.pay === null ? "-" : formatYen(row.pay)}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.totalMinutes > 0 ? row.pay === null ? "-" : formatYen(row.pay) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
