@@ -71,6 +71,7 @@ type AttendanceStore = {
 };
 
 type AdminView = "menu" | "members" | "add-member" | "manual" | "records" | "summary";
+type StaffPanel = "" | "today-edit" | "work-detail" | "pay-detail";
 
 const DEFAULT_ADMIN_CODE = "0622";
 const DEVELOPER_CODE = "19788011";
@@ -553,6 +554,8 @@ export default function AttendancePage() {
   const [recordMonth, setRecordMonth] = useState(currentMonth());
   const [summaryMonth, setSummaryMonth] = useState(currentMonth());
   const [saveNotice, setSaveNotice] = useState("");
+  const [staffPanel, setStaffPanel] = useState<StaffPanel>("");
+  const [staffSaveNotice, setStaffSaveNotice] = useState("");
   const [isPunchSaving, setIsPunchSaving] = useState(false);
   const hasLoadedStore = useRef(false);
   const hasPendingSave = useRef(false);
@@ -683,6 +686,20 @@ export default function AttendancePage() {
       pay: monthlyPay(staffMonthRecords, punchStaff, now)
     };
   }, [punchStaff, currentWorkDate, records, now]);
+
+  const currentStaffMonthRows = useMemo(() => {
+    if (!currentStaff) return [];
+    const targetMonth = currentWorkDate.slice(0, 7);
+    return monthDays(targetMonth).filter((workDate) => workDate <= currentWorkDate).map((workDate) => {
+      const record = records.find((item) => item.employeeId === currentStaff.id && item.workDate === workDate);
+      const realtimeRecord = record ? recordWithRealtime(record, now) : null;
+      return {
+        workDate,
+        totalMinutes: realtimeRecord?.totalMinutes ?? 0,
+        pay: currentStaff.payType === "monthly" ? null : realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0
+      };
+    });
+  }, [currentStaff, currentWorkDate, records, now]);
 
   const manualRecordsByDate = useMemo(() => {
     const map = new Map<string, WorkDayRecord>();
@@ -1005,12 +1022,12 @@ export default function AttendancePage() {
     setMessage(`${employee?.name ?? "メンバー"}さんを削除しました。`);
   }
 
-  function manualDraftKey(workDate: string) {
-    return `${manualEmployeeId}:${workDate}`;
+  function manualDraftKeyFor(employeeId: string, workDate: string) {
+    return `${employeeId}:${workDate}`;
   }
 
-  function draftForDay(workDate: string, record?: WorkDayRecord) {
-    const draftKey = manualDraftKey(workDate);
+  function draftForEmployeeDay(employeeId: string, workDate: string, record?: WorkDayRecord) {
+    const draftKey = manualDraftKeyFor(employeeId, workDate);
     if (manualDrafts[draftKey]) return manualDrafts[draftKey];
     if (!record || record.status === "off") return { punches: [] };
     const recordPunches = sortedPunches(record);
@@ -1025,22 +1042,28 @@ export default function AttendancePage() {
     return { punches };
   }
 
-  function updateManualPunch(workDate: string, punchId: string, patch: Partial<ManualPunchDraft>) {
-    const record = manualRecordsByDate.get(workDate);
-    const draftKey = manualDraftKey(workDate);
+  function draftForDay(workDate: string, record?: WorkDayRecord) {
+    return draftForEmployeeDay(manualEmployeeId, workDate, record);
+  }
+
+  function updatePunchDraft(employeeId: string, workDate: string, record: WorkDayRecord | undefined, punchId: string, patch: Partial<ManualPunchDraft>) {
+    const draftKey = manualDraftKeyFor(employeeId, workDate);
     setManualDrafts((current) => ({
       ...current,
       [draftKey]: {
-        ...draftForDay(workDate, record),
-        punches: draftForDay(workDate, record).punches.map((punch) => (punch.id === punchId ? { ...punch, ...patch } : punch))
+        ...draftForEmployeeDay(employeeId, workDate, record),
+        punches: draftForEmployeeDay(employeeId, workDate, record).punches.map((punch) => (punch.id === punchId ? { ...punch, ...patch } : punch))
       }
     }));
   }
 
-  function addManualPunch(workDate: string) {
-    const record = manualRecordsByDate.get(workDate);
-    const draft = draftForDay(workDate, record);
-    const draftKey = manualDraftKey(workDate);
+  function updateManualPunch(workDate: string, punchId: string, patch: Partial<ManualPunchDraft>) {
+    updatePunchDraft(manualEmployeeId, workDate, manualRecordsByDate.get(workDate), punchId, patch);
+  }
+
+  function addPunchDraft(employeeId: string, workDate: string, record?: WorkDayRecord) {
+    const draft = draftForEmployeeDay(employeeId, workDate, record);
+    const draftKey = manualDraftKeyFor(employeeId, workDate);
     const lastPunch = draft.punches[draft.punches.length - 1];
     const nextType: PunchType = lastPunch?.type === "start" ? "end" : "start";
     const defaultTime = lastPunch?.time || (nextType === "start" ? "09:00" : "18:00");
@@ -1052,16 +1075,23 @@ export default function AttendancePage() {
     }));
   }
 
-  function removeManualPunch(workDate: string, punchId: string) {
-    const record = manualRecordsByDate.get(workDate);
-    const draft = draftForDay(workDate, record);
-    const draftKey = manualDraftKey(workDate);
+  function addManualPunch(workDate: string) {
+    addPunchDraft(manualEmployeeId, workDate, manualRecordsByDate.get(workDate));
+  }
+
+  function removePunchDraft(employeeId: string, workDate: string, record: WorkDayRecord | undefined, punchId: string) {
+    const draft = draftForEmployeeDay(employeeId, workDate, record);
+    const draftKey = manualDraftKeyFor(employeeId, workDate);
     setManualDrafts((current) => ({
       ...current,
       [draftKey]: {
         punches: draft.punches.filter((punch) => punch.id !== punchId)
       }
     }));
+  }
+
+  function removeManualPunch(workDate: string, punchId: string) {
+    removePunchDraft(manualEmployeeId, workDate, manualRecordsByDate.get(workDate), punchId);
   }
 
   function punchesFromDraft(workDate: string, draft: ManualDraft) {
@@ -1100,9 +1130,8 @@ export default function AttendancePage() {
     };
   }
 
-  function manualRecordFromDraft(workDate: string) {
-    const existing = manualRecordsByDate.get(workDate);
-    const draft = draftForDay(workDate, existing);
+  function recordFromEmployeeDraft(employeeId: string, workDate: string, existing?: WorkDayRecord) {
+    const draft = draftForEmployeeDay(employeeId, workDate, existing);
     const summary = draftSummary(workDate, draft);
     if (!summary) return null;
     const isOpenCurrentWorkDate = summary.status === "missing" && workDate === businessDate(now);
@@ -1112,7 +1141,7 @@ export default function AttendancePage() {
     if (summary.status === "off") {
       return {
         id: existing?.id ?? createId("work-day"),
-        employeeId: manualEmployeeId,
+        employeeId,
         workDate,
         totalMinutes: 0,
         nightMinutes: 0,
@@ -1125,7 +1154,7 @@ export default function AttendancePage() {
 
     return {
       id: existing?.id ?? createId("work-day"),
-      employeeId: manualEmployeeId,
+      employeeId,
       workDate,
       totalMinutes: summary.totalMinutes,
       nightMinutes: summary.nightMinutes,
@@ -1136,9 +1165,40 @@ export default function AttendancePage() {
     };
   }
 
+  function manualRecordFromDraft(workDate: string) {
+    return recordFromEmployeeDraft(manualEmployeeId, workDate, manualRecordsByDate.get(workDate));
+  }
+
   function showSavedNotice(text: string) {
     setSaveNotice(text);
     window.setTimeout(() => setSaveNotice(""), 1800);
+  }
+
+  function showStaffSavedNotice(text: string) {
+    setStaffSaveNotice(text);
+    window.setTimeout(() => setStaffSaveNotice(""), 1800);
+  }
+
+  function saveStaffToday() {
+    if (!currentStaff) return;
+    const nextRecord = recordFromEmployeeDraft(currentStaff.id, currentWorkDate, currentRecord ?? undefined);
+    if (!nextRecord) {
+      setMessage("勤務開始と勤務終了の順番を確認してください。");
+      return;
+    }
+    const nextRecords = upsertRecordList(records, nextRecord);
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(employees, nextRecords)
+      .then(() => {
+        skipNextAutoSave.current = true;
+        setRecords(nextRecords);
+        setMessage("本日の勤務を修正しました。");
+        showStaffSavedNotice("保存しました");
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function saveManualSingleDay() {
@@ -1222,6 +1282,9 @@ export default function AttendancePage() {
     });
     exportCsvFile(`attendance-summary-${summaryMonth}.csv`, rows);
   }
+
+  const staffTodayDraft = currentStaff ? draftForEmployeeDay(currentStaff.id, currentWorkDate, currentRecord ?? undefined) : null;
+  const staffTodaySummary = staffTodayDraft ? draftSummary(currentWorkDate, staffTodayDraft) : null;
 
   if (isLoading) {
     return (
@@ -1312,26 +1375,148 @@ export default function AttendancePage() {
                 {isPunchSaving ? "保存中..." : currentIsWorking ? "勤務終了" : "勤務開始"}
               </button>
 
-              <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-4">
-                <div className="rounded-md bg-white p-3">
+              <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-3">
+                <div className="grid gap-2 rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">本日の勤務</p>
                   <p className="text-xl font-black">{currentRealtimeRecord ? formatDuration(currentRealtimeRecord.totalMinutes) : "0時間00分"}</p>
+                  <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "today-edit" ? "" : "today-edit")} type="button">
+                    修正
+                  </button>
                 </div>
-                <div className="rounded-md bg-white p-3">
-                  <p className="font-bold text-stone-500">当月の勤務</p>
+                <div className="grid gap-2 rounded-md bg-white p-3">
+                  <p className="font-bold text-stone-500">当月の勤務時間</p>
                   <p className="text-xl font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.totalMinutes) : "0時間00分"}</p>
+                  <p className="text-xs font-bold text-stone-500">うち深夜時間{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
+                  <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "work-detail" ? "" : "work-detail")} type="button">
+                    詳細
+                  </button>
                 </div>
-                <div className="rounded-md bg-white p-3">
-                  <p className="font-bold text-stone-500">当月の深夜</p>
-                  <p className="text-xl font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
-                </div>
-                <div className="rounded-md bg-white p-3">
+                <div className="grid gap-2 rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">当月の給与</p>
                   <p className="text-xl font-black">{currentMonthSummary ? formatYen(currentMonthSummary.pay) : "¥0"}</p>
+                  <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "pay-detail" ? "" : "pay-detail")} type="button">
+                    詳細
+                  </button>
                 </div>
               </div>
 
               {currentRealtimeRecord?.status === "missing" ? <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">前回の勤務終了が未登録です。管理者に修正を依頼してください。</p> : null}
+
+              {staffPanel === "today-edit" && currentStaff && staffTodayDraft ? (
+                <div className="rounded-md border border-stone-200 bg-white p-3 text-left">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-bold text-stone-500">本日の勤務を修正</p>
+                      <p className="font-black">{currentWorkDate}</p>
+                    </div>
+                    <button className="h-9 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => addPunchDraft(currentStaff.id, currentWorkDate, currentRecord ?? undefined)} type="button">
+                      打刻を追加
+                    </button>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    {staffTodayDraft.punches.length === 0 ? (
+                      <p className="rounded-md bg-stone-50 px-3 py-3 text-sm font-bold text-stone-500">打刻なし。このまま保存すると休みになります。</p>
+                    ) : (
+                      staffTodayDraft.punches.map((punch, index) => (
+                        <div className="grid grid-cols-[1fr_1fr_auto] gap-2" key={punch.id}>
+                          <select className="h-10 rounded-md border border-stone-300 bg-white px-2 text-sm font-bold outline-none" onChange={(event) => updatePunchDraft(currentStaff.id, currentWorkDate, currentRecord ?? undefined, punch.id, { type: event.target.value as PunchType })} value={punch.type}>
+                            <option value="start">勤務開始</option>
+                            <option value="end">勤務終了</option>
+                          </select>
+                          <input className="h-10 rounded-md border border-stone-300 bg-white px-3 text-base font-bold outline-none" onChange={(event) => updatePunchDraft(currentStaff.id, currentWorkDate, currentRecord ?? undefined, punch.id, { time: event.target.value })} type="time" value={punch.time} />
+                          <button aria-label={`${index + 1}番目の打刻を削除`} className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => removePunchDraft(currentStaff.id, currentWorkDate, currentRecord ?? undefined, punch.id)} type="button">
+                            削除
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  {staffTodaySummary ? (
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
+                      <div className="rounded-md bg-stone-50 px-3 py-2">
+                        <p className="text-xs font-bold text-stone-500">休憩</p>
+                        <p className="font-black">{formatDuration(staffTodaySummary.breakMinutes)}</p>
+                      </div>
+                      <div className="rounded-md bg-stone-50 px-3 py-2">
+                        <p className="text-xs font-bold text-stone-500">勤務</p>
+                        <p className="font-black">{formatDuration(staffTodaySummary.totalMinutes)}</p>
+                      </div>
+                      <div className="rounded-md bg-stone-50 px-3 py-2">
+                        <p className="text-xs font-bold text-stone-500">深夜</p>
+                        <p className="font-black">{formatDuration(staffTodaySummary.nightMinutes)}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">勤務開始と勤務終了の順番を確認してください。</p>
+                  )}
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button className="h-11 rounded-md bg-stone-100 px-3 font-black text-stone-800" onClick={() => setStaffPanel("")} type="button">
+                      閉じる
+                    </button>
+                    <button className="h-11 rounded-md bg-emerald-700 px-3 font-black text-white disabled:bg-stone-300" disabled={!staffTodaySummary || isSaving} onClick={saveStaffToday} type="button">
+                      {staffSaveNotice || "保存"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {staffPanel === "work-detail" ? (
+                <div className="rounded-md border border-stone-200 bg-white p-3 text-left">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-black">当月の勤務時間</h3>
+                    <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel("")} type="button">
+                      閉じる
+                    </button>
+                  </div>
+                  <div className="mt-3 max-h-96 overflow-y-auto">
+                    <table className="w-full border-collapse text-sm">
+                      <thead className="sticky top-0 bg-stone-100 text-xs font-black text-stone-600">
+                        <tr>
+                          <th className="px-3 py-2 text-left">日付</th>
+                          <th className="px-3 py-2 text-right">勤務時間</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentStaffMonthRows.map((row) => (
+                          <tr className="border-t border-stone-100" key={row.workDate}>
+                            <td className="px-3 py-2 font-bold">{row.workDate}</td>
+                            <td className="px-3 py-2 text-right font-black">{formatDuration(row.totalMinutes)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
+
+              {staffPanel === "pay-detail" ? (
+                <div className="rounded-md border border-stone-200 bg-white p-3 text-left">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-black">当月の給与</h3>
+                    <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel("")} type="button">
+                      閉じる
+                    </button>
+                  </div>
+                  <div className="mt-3 max-h-96 overflow-y-auto">
+                    <table className="w-full border-collapse text-sm">
+                      <thead className="sticky top-0 bg-stone-100 text-xs font-black text-stone-600">
+                        <tr>
+                          <th className="px-3 py-2 text-left">日付</th>
+                          <th className="px-3 py-2 text-right">給与</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentStaffMonthRows.map((row) => (
+                          <tr className="border-t border-stone-100" key={row.workDate}>
+                            <td className="px-3 py-2 font-bold">{row.workDate}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.pay === null ? "-" : formatYen(row.pay)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
             </div>
             {message ? <p className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">{message}</p> : null}
           </section>
