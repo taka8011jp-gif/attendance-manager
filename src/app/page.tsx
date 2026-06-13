@@ -690,7 +690,7 @@ export default function AttendancePage() {
   const currentStaffMonthRows = useMemo(() => {
     if (!currentStaff) return [];
     const targetMonth = currentWorkDate.slice(0, 7);
-    return monthDays(targetMonth).filter((workDate) => workDate <= currentWorkDate).map((workDate) => {
+    return monthDays(targetMonth).filter((workDate) => workDate <= currentWorkDate).reverse().map((workDate) => {
       const record = records.find((item) => item.employeeId === currentStaff.id && item.workDate === workDate);
       const realtimeRecord = record ? recordWithRealtime(record, now) : null;
       return {
@@ -770,7 +770,7 @@ export default function AttendancePage() {
     setRecords((current) => upsertRecordList(current, nextRecord));
   }
 
-  async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[]) {
+  async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[], options: { keepPending?: boolean } = {}) {
     hasPendingSave.current = true;
     setIsSaving(true);
     try {
@@ -782,25 +782,73 @@ export default function AttendancePage() {
       if (!response.ok) throw new Error("保存できませんでした。");
       setDataError("");
     } finally {
-      hasPendingSave.current = false;
-      setIsSaving(false);
+      if (!options.keepPending) {
+        hasPendingSave.current = false;
+        setIsSaving(false);
+      }
     }
+  }
+
+  async function fetchSharedStoreSnapshot() {
+    const response = await fetch("/api/attendance", { cache: "no-store" });
+    if (!response.ok) throw new Error("共有データを確認できませんでした。");
+    const store = (await response.json()) as AttendanceStore;
+    const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
+    const normalizedRecords = fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees);
+    return { employees: normalizedEmployees, records: normalizedRecords };
+  }
+
+  function punchListsMatch(left: Punch[], right: Punch[]) {
+    const leftPunches = sortedPunches({ id: "left", employeeId: "", workDate: "", totalMinutes: 0, nightMinutes: 0, breakMinutes: 0, activeStartedAt: null, status: "registered", punches: left });
+    const rightPunches = sortedPunches({ id: "right", employeeId: "", workDate: "", totalMinutes: 0, nightMinutes: 0, breakMinutes: 0, activeStartedAt: null, status: "registered", punches: right });
+    return leftPunches.length === rightPunches.length && leftPunches.every((punch, index) => punch.type === rightPunches[index]?.type && punch.at === rightPunches[index]?.at);
+  }
+
+  function recordMatchesSavedRecord(expected: WorkDayRecord, saved?: WorkDayRecord) {
+    if (!saved) return false;
+    return (
+      saved.status === expected.status &&
+      (saved.activeStartedAt ?? "") === (expected.activeStartedAt ?? "") &&
+      saved.totalMinutes === expected.totalMinutes &&
+      saved.nightMinutes === expected.nightMinutes &&
+      saved.breakMinutes === expected.breakMinutes &&
+      punchListsMatch(expected.punches, saved.punches)
+    );
+  }
+
+  async function waitForSharedRecord(expectedRecord: WorkDayRecord) {
+    let latestSnapshot: { employees: Employee[]; records: WorkDayRecord[] } | null = null;
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      latestSnapshot = await fetchSharedStoreSnapshot();
+      const savedRecord = latestSnapshot.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
+      if (recordMatchesSavedRecord(expectedRecord, savedRecord)) return latestSnapshot;
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+    }
+    throw new Error("保存後の同期を確認できませんでした。");
   }
 
   function savePunchRecord(nextRecord: WorkDayRecord, successMessage: string) {
     const nextRecords = upsertRecordList(records, nextRecord);
+    const expectedRecord = nextRecords.find((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate) ?? nextRecord;
     setMessage("保存中です...");
 
-    return saveSharedStoreImmediately(employees, nextRecords)
-      .then(() => {
+    return saveSharedStoreImmediately(employees, nextRecords, { keepPending: true })
+      .then(async () => {
+        setMessage("共有データを確認しています...");
+        const confirmedStore = await waitForSharedRecord(expectedRecord);
         skipNextAutoSave.current = true;
-        setRecords(nextRecords);
+        setEmployees(confirmedStore.employees);
+        setRecords(confirmedStore.records);
         setMessage(successMessage);
       })
       .catch(() => {
-        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
-        setMessage("保存できませんでした。もう一度押してください。");
+        setDataError("共有データへの保存確認が完了できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存確認ができませんでした。もう一度押してください。");
         throw new Error("Punch save failed");
+      })
+      .finally(() => {
+        hasPendingSave.current = false;
+        setIsSaving(false);
       });
   }
 
@@ -1468,9 +1516,9 @@ export default function AttendancePage() {
                       閉じる
                     </button>
                   </div>
-                  <div className="mt-3 max-h-96 overflow-y-auto">
+                  <div className="mt-3">
                     <table className="w-full border-collapse text-sm">
-                      <thead className="sticky top-0 bg-stone-100 text-xs font-black text-stone-600">
+                      <thead className="bg-stone-100 text-xs font-black text-stone-600">
                         <tr>
                           <th className="px-3 py-2 text-left">日付</th>
                           <th className="px-3 py-2 text-right">勤務時間</th>
@@ -1497,9 +1545,9 @@ export default function AttendancePage() {
                       閉じる
                     </button>
                   </div>
-                  <div className="mt-3 max-h-96 overflow-y-auto">
+                  <div className="mt-3">
                     <table className="w-full border-collapse text-sm">
-                      <thead className="sticky top-0 bg-stone-100 text-xs font-black text-stone-600">
+                      <thead className="bg-stone-100 text-xs font-black text-stone-600">
                         <tr>
                           <th className="px-3 py-2 text-left">日付</th>
                           <th className="px-3 py-2 text-right">給与</th>
