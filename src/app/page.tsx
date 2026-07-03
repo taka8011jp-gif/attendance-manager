@@ -700,6 +700,7 @@ export default function AttendancePage() {
       const realtimeRecord = record ? recordWithRealtime(record, now) : null;
       return {
         workDate,
+        status: realtimeRecord?.status ?? ("off" as const),
         totalMinutes: realtimeRecord?.totalMinutes ?? 0,
         pay: currentStaff.payType === "monthly" ? null : realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0
       };
@@ -1556,7 +1557,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{row.totalMinutes > 0 ? formatDuration(row.totalMinutes) : "休み"}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.status === "missing" ? "未登録" : row.totalMinutes > 0 ? formatDuration(row.totalMinutes) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1585,7 +1586,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{row.totalMinutes > 0 ? row.pay === null ? "-" : formatYen(row.pay) : "休み"}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.status === "missing" ? "未登録" : row.totalMinutes > 0 ? row.pay === null ? "-" : formatYen(row.pay) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
