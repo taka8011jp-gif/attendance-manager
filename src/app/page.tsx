@@ -231,6 +231,14 @@ function lastEndAt(record?: WorkDayRecord) {
   return [...sortedPunches(record)].reverse().find((punch) => punch.type === "end")?.at ?? "";
 }
 
+function isUnregisteredRecord(record?: WorkDayRecord | null) {
+  if (!record || record.status === "off") return false;
+  if (record.status === "missing") return true;
+  if (record.status === "working") return false;
+  const lastPunch = sortedPunches(record).at(-1);
+  return lastPunch?.type === "start";
+}
+
 function startDisplay(record: WorkDayRecord) {
   if (record.status === "off") return "休み";
   return formatTimeOnly(firstStartAt(record));
@@ -238,7 +246,7 @@ function startDisplay(record: WorkDayRecord) {
 
 function endDisplay(record: WorkDayRecord) {
   if (record.status === "off") return "休み";
-  if (record.status === "missing") return "未登録";
+  if (isUnregisteredRecord(record)) return "未登録";
   return formatTimeOnly(lastEndAt(record));
 }
 
@@ -701,6 +709,7 @@ export default function AttendancePage() {
       return {
         workDate,
         status: realtimeRecord?.status ?? ("off" as const),
+        isUnregistered: isUnregisteredRecord(realtimeRecord),
         totalMinutes: realtimeRecord?.totalMinutes ?? 0,
         pay: currentStaff.payType === "monthly" ? null : realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0
       };
@@ -1557,7 +1566,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{row.status === "missing" ? "未登録" : row.totalMinutes > 0 ? formatDuration(row.totalMinutes) : "休み"}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.isUnregistered ? "未登録" : row.totalMinutes > 0 ? formatDuration(row.totalMinutes) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1586,7 +1595,7 @@ export default function AttendancePage() {
                         {currentStaffMonthRows.map((row) => (
                           <tr className="border-t border-stone-100" key={row.workDate}>
                             <td className="px-3 py-2 font-bold">{row.workDate}</td>
-                            <td className="px-3 py-2 text-right font-black">{row.status === "missing" ? "未登録" : row.totalMinutes > 0 ? row.pay === null ? "-" : formatYen(row.pay) : "休み"}</td>
+                            <td className="px-3 py-2 text-right font-black">{row.isUnregistered ? "未登録" : row.totalMinutes > 0 ? row.pay === null ? "-" : formatYen(row.pay) : "休み"}</td>
                           </tr>
                         ))}
                       </tbody>
