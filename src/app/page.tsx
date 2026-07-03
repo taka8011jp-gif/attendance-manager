@@ -70,6 +70,11 @@ type AttendanceStore = {
   records: WorkDayRecord[];
 };
 
+type SharedStoreSnapshot = {
+  employees: Employee[];
+  records: WorkDayRecord[];
+};
+
 type AdminView = "menu" | "members" | "add-member" | "manual" | "records" | "summary";
 type StaffPanel = "" | "today-edit" | "work-detail" | "pay-detail";
 
@@ -770,17 +775,38 @@ export default function AttendancePage() {
     setRecords((current) => upsertRecordList(current, nextRecord));
   }
 
+  function normalizeSharedStoreSnapshot(store: AttendanceStore): SharedStoreSnapshot {
+    const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
+    const normalizedRecords = fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees);
+    return { employees: normalizedEmployees, records: normalizedRecords };
+  }
+
+  function wait(milliseconds: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
   async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[], options: { keepPending?: boolean } = {}) {
     hasPendingSave.current = true;
     setIsSaving(true);
     try {
-      const response = await fetch("/api/attendance", {
-        body: JSON.stringify({ employees: nextEmployees, records: nextRecords }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST"
-      });
-      if (!response.ok) throw new Error("保存できませんでした。");
-      setDataError("");
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const response = await fetch("/api/attendance", {
+            body: JSON.stringify({ employees: nextEmployees, records: nextRecords }),
+            headers: { "Content-Type": "application/json" },
+            method: "POST"
+          });
+          if (!response.ok) throw new Error("保存できませんでした。");
+          const savedStore = normalizeSharedStoreSnapshot((await response.json()) as AttendanceStore);
+          setDataError("");
+          return savedStore;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await wait(500 * (attempt + 1));
+        }
+      }
+      throw lastError instanceof Error ? lastError : new Error("保存できませんでした。");
     } finally {
       if (!options.keepPending) {
         hasPendingSave.current = false;
@@ -793,9 +819,7 @@ export default function AttendancePage() {
     const response = await fetch("/api/attendance", { cache: "no-store" });
     if (!response.ok) throw new Error("共有データを確認できませんでした。");
     const store = (await response.json()) as AttendanceStore;
-    const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
-    const normalizedRecords = fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees);
-    return { employees: normalizedEmployees, records: normalizedRecords };
+    return normalizeSharedStoreSnapshot(store);
   }
 
   function punchListsMatch(left: Punch[], right: Punch[]) {
@@ -806,23 +830,16 @@ export default function AttendancePage() {
 
   function recordMatchesSavedRecord(expected: WorkDayRecord, saved?: WorkDayRecord) {
     if (!saved) return false;
-    return (
-      saved.status === expected.status &&
-      (saved.activeStartedAt ?? "") === (expected.activeStartedAt ?? "") &&
-      saved.totalMinutes === expected.totalMinutes &&
-      saved.nightMinutes === expected.nightMinutes &&
-      saved.breakMinutes === expected.breakMinutes &&
-      punchListsMatch(expected.punches, saved.punches)
-    );
+    return punchListsMatch(expected.punches, saved.punches);
   }
 
   async function waitForSharedRecord(expectedRecord: WorkDayRecord) {
-    let latestSnapshot: { employees: Employee[]; records: WorkDayRecord[] } | null = null;
+    let latestSnapshot: SharedStoreSnapshot | null = null;
     for (let attempt = 0; attempt < 15; attempt += 1) {
       latestSnapshot = await fetchSharedStoreSnapshot();
       const savedRecord = latestSnapshot.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
       if (recordMatchesSavedRecord(expectedRecord, savedRecord)) return latestSnapshot;
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      await wait(700);
     }
     throw new Error("保存後の同期を確認できませんでした。");
   }
@@ -833,9 +850,10 @@ export default function AttendancePage() {
     setMessage("保存中です...");
 
     return saveSharedStoreImmediately(employees, nextRecords, { keepPending: true })
-      .then(async () => {
+      .then(async (savedStore) => {
         setMessage("共有データを確認しています...");
-        const confirmedStore = await waitForSharedRecord(expectedRecord);
+        const savedRecord = savedStore.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
+        const confirmedStore = recordMatchesSavedRecord(expectedRecord, savedRecord) ? savedStore : await waitForSharedRecord(expectedRecord);
         const confirmedRecord = confirmedStore.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
         const draftKey = manualDraftKeyFor(expectedRecord.employeeId, expectedRecord.workDate);
         skipNextAutoSave.current = true;
