@@ -239,6 +239,11 @@ function isUnregisteredRecord(record?: WorkDayRecord | null) {
   return lastPunch?.type === "start";
 }
 
+function hasOpenFinalPunch(record?: WorkDayRecord | null) {
+  if (!record || record.status === "off") return false;
+  return sortedPunches(record).at(-1)?.type === "start";
+}
+
 function startDisplay(record: WorkDayRecord) {
   if (record.status === "off") return "休み";
   return formatTimeOnly(firstStartAt(record));
@@ -709,7 +714,7 @@ export default function AttendancePage() {
       return {
         workDate,
         status: realtimeRecord?.status ?? ("off" as const),
-        isUnregistered: isUnregisteredRecord(realtimeRecord),
+        isUnregistered: isUnregisteredRecord(realtimeRecord) || hasOpenFinalPunch(realtimeRecord),
         totalMinutes: realtimeRecord?.totalMinutes ?? 0,
         pay: currentStaff.payType === "monthly" ? null : realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0
       };
