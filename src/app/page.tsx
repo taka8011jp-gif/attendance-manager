@@ -363,6 +363,10 @@ function showsNightBreakdown(employee?: Employee | null) {
   return employee?.role === "アルバイト";
 }
 
+function showsStaffPayCard(employee?: Employee | null) {
+  return employee?.role !== "社員";
+}
+
 function payLabel(employee: Employee) {
   if (!isHourlyRole(employee.role)) return employee.role;
   return `${employee.role} 時給 ${formatYen(employeePayAmount(employee))}`;
@@ -1455,7 +1459,7 @@ export default function AttendancePage() {
                 {isPunchSaving ? "保存中..." : currentIsWorking ? "勤務終了" : "勤務開始"}
               </button>
 
-              <div className="grid grid-cols-1 gap-2 text-center text-sm sm:grid-cols-3">
+              <div className={`grid grid-cols-1 gap-2 text-center text-sm ${showsStaffPayCard(currentStaff) ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                 <div className="grid gap-2 rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">本日の勤務</p>
                   <p className="text-xl font-black">{currentRealtimeRecord ? formatDuration(currentRealtimeRecord.totalMinutes) : "0時間00分"}</p>
@@ -1471,13 +1475,15 @@ export default function AttendancePage() {
                     詳細
                   </button>
                 </div>
-                <div className="grid gap-2 rounded-md bg-white p-3">
-                  <p className="font-bold text-stone-500">当月の給与</p>
-                  <p className="text-xl font-black">{currentMonthSummary ? formatYen(currentMonthSummary.pay) : "¥0"}</p>
-                  <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "pay-detail" ? "" : "pay-detail")} type="button">
-                    詳細
-                  </button>
-                </div>
+                {showsStaffPayCard(currentStaff) ? (
+                  <div className="grid gap-2 rounded-md bg-white p-3">
+                    <p className="font-bold text-stone-500">当月の給与</p>
+                    <p className="text-xl font-black">{currentMonthSummary ? formatYen(currentMonthSummary.pay) : "¥0"}</p>
+                    <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "pay-detail" ? "" : "pay-detail")} type="button">
+                      詳細
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               {currentRealtimeRecord?.status === "missing" ? <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">前回の勤務終了が未登録です。管理者に修正を依頼してください。</p> : null}
@@ -1571,7 +1577,7 @@ export default function AttendancePage() {
                 </div>
               ) : null}
 
-              {staffPanel === "pay-detail" ? (
+              {staffPanel === "pay-detail" && showsStaffPayCard(currentStaff) ? (
                 <div className="rounded-md border border-stone-200 bg-white p-3 text-left">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="font-black">当月の給与</h3>
