@@ -5,11 +5,12 @@ import path from "node:path";
 export const runtime = "nodejs";
 
 type PayType = "hourly" | "monthly";
+type StaffRole = "管理者" | "社員" | "業務委託社員" | "アルバイト";
 
 type Employee = {
   id: string;
   name: string;
-  role: string;
+  role: StaffRole;
   staffCode: string;
   payType: PayType;
   payAmount: number;
@@ -34,6 +35,7 @@ type WorkDayRecord = {
   breakMinutes: number;
   payTypeSnapshot?: PayType;
   payAmountSnapshot?: number;
+  payRoleSnapshot?: StaffRole;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -47,9 +49,9 @@ type AttendanceStore = {
 const DEFAULT_ADMIN_CODE = "0622";
 
 const seedEmployees: Employee[] = [
-  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "hourly", payAmount: 1500, hourlyWage: 1500 },
-  { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", payType: "hourly", payAmount: 1200, hourlyWage: 1200 },
-  { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", payType: "hourly", payAmount: 1200, hourlyWage: 1200 }
+  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "monthly", payAmount: 0, hourlyWage: 0 },
+  { id: "emp-staff-a", name: "佐藤", role: "アルバイト", staffCode: "1001", payType: "hourly", payAmount: 1200, hourlyWage: 1200 },
+  { id: "emp-staff-b", name: "鈴木", role: "アルバイト", staffCode: "1002", payType: "hourly", payAmount: 1200, hourlyWage: 1200 }
 ];
 
 const dataDir = process.env.ATTENDANCE_DATA_DIR ?? path.join(process.cwd(), "data");
@@ -68,20 +70,35 @@ function businessEnd(workDate: string) {
   return end;
 }
 
+function normalizeRole(role?: string | null, fallback?: StaffRole): StaffRole {
+  if (role === "管理者" || role === "社員" || role === "業務委託社員" || role === "アルバイト") return role;
+  if (role === "スタッフ") return "アルバイト";
+  return fallback ?? "アルバイト";
+}
+
+function isHourlyRole(role: StaffRole) {
+  return role === "業務委託社員" || role === "アルバイト";
+}
+
+function rolePayType(role: StaffRole): PayType {
+  return isHourlyRole(role) ? "hourly" : "monthly";
+}
+
 function normalizeEmployee(employee: Partial<Employee> & { id?: string }, index: number): Employee {
   const seed = seedEmployees[index] ?? null;
-  const hourlyWage = Number(employee.hourlyWage ?? seed?.hourlyWage ?? 1200);
-  const payType: PayType = employee.payType === "monthly" ? "monthly" : "hourly";
+  const role = normalizeRole(employee.role, seed?.role ?? (employee.payType === "monthly" ? "社員" : "アルバイト"));
+  const payType = rolePayType(role);
   const payAmount = Number(employee.payAmount ?? employee.hourlyWage ?? seed?.payAmount ?? 1200);
+  const normalizedPayAmount = Number.isFinite(payAmount) && payAmount >= 0 ? Math.floor(payAmount) : 1200;
 
   return {
     id: employee.id || `emp-${index + 1}`,
     name: employee.name?.trim() || seed?.name || `スタッフ${index + 1}`,
-    role: employee.role?.trim() || seed?.role || "スタッフ",
+    role,
     staffCode: String(employee.staffCode || seed?.staffCode || 1000 + index),
     payType,
-    payAmount: Number.isFinite(payAmount) && payAmount >= 0 ? Math.floor(payAmount) : 1200,
-    hourlyWage: Number.isFinite(hourlyWage) && hourlyWage >= 0 ? Math.floor(hourlyWage) : 1200
+    payAmount: isHourlyRole(role) ? normalizedPayAmount : 0,
+    hourlyWage: isHourlyRole(role) ? normalizedPayAmount : 0
   };
 }
 
@@ -108,6 +125,7 @@ function normalizeRecord(record: Partial<WorkDayRecord> & { id?: string; employe
     breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
     payTypeSnapshot: record.payTypeSnapshot === "monthly" || record.payTypeSnapshot === "hourly" ? record.payTypeSnapshot : undefined,
     payAmountSnapshot: Number.isFinite(payAmountSnapshot) && payAmountSnapshot >= 0 ? Math.floor(payAmountSnapshot) : undefined,
+    payRoleSnapshot: record.payRoleSnapshot ? normalizeRole(record.payRoleSnapshot) : undefined,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches
@@ -122,12 +140,13 @@ function employeePayAmount(employee: Employee) {
 function fillMissingPaySnapshots(records: WorkDayRecord[], employees: Employee[]) {
   const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
   return records.map((record) => {
-    if (record.payTypeSnapshot !== undefined) return record;
     const employee = employeeMap.get(record.employeeId);
+    if (record.payTypeSnapshot !== undefined && record.payRoleSnapshot !== undefined) return record;
     if (!employee) return record;
     return {
       ...record,
-      payTypeSnapshot: employee.payType,
+      payRoleSnapshot: employee.role,
+      payTypeSnapshot: rolePayType(employee.role),
       payAmountSnapshot: employeePayAmount(employee)
     };
   });

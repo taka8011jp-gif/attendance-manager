@@ -3,11 +3,12 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type PayType = "hourly" | "monthly";
+type StaffRole = "管理者" | "社員" | "業務委託社員" | "アルバイト";
 
 type Employee = {
   id: string;
   name: string;
-  role: string;
+  role: StaffRole;
   staffCode: string;
   payType: PayType;
   payAmount: number;
@@ -38,6 +39,7 @@ type WorkDayRecord = {
   breakMinutes: number;
   payTypeSnapshot?: PayType;
   payAmountSnapshot?: number;
+  payRoleSnapshot?: StaffRole;
   activeStartedAt: string | null;
   status: WorkStatus;
   punches: Punch[];
@@ -81,11 +83,12 @@ type StaffPanel = "" | "today-edit" | "work-detail" | "pay-detail";
 const DEFAULT_ADMIN_CODE = "0622";
 const DEVELOPER_CODE = "19788011";
 const SYNC_INTERVAL_MS = 5000;
+const staffRoles: StaffRole[] = ["管理者", "社員", "業務委託社員", "アルバイト"];
 
 const seedEmployees: Employee[] = [
-  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "hourly", payAmount: 1500 },
-  { id: "emp-staff-a", name: "佐藤", role: "スタッフ", staffCode: "1001", payType: "hourly", payAmount: 1200 },
-  { id: "emp-staff-b", name: "鈴木", role: "スタッフ", staffCode: "1002", payType: "hourly", payAmount: 1200 }
+  { id: "emp-manager", name: "店長", role: "管理者", staffCode: DEFAULT_ADMIN_CODE, payType: "monthly", payAmount: 0 },
+  { id: "emp-staff-a", name: "佐藤", role: "アルバイト", staffCode: "1001", payType: "hourly", payAmount: 1200 },
+  { id: "emp-staff-b", name: "鈴木", role: "アルバイト", staffCode: "1002", payType: "hourly", payAmount: 1200 }
 ];
 
 const adminMenu: Array<{ id: AdminView; label: string }> = [
@@ -342,17 +345,54 @@ function employeePayAmount(employee: Employee) {
   return Number.isFinite(amount) && amount >= 0 ? Math.floor(amount) : 0;
 }
 
+function normalizeRole(role?: string | null, fallback?: StaffRole): StaffRole {
+  if (role === "管理者" || role === "社員" || role === "業務委託社員" || role === "アルバイト") return role;
+  if (role === "スタッフ") return "アルバイト";
+  return fallback ?? "アルバイト";
+}
+
+function isHourlyRole(role: StaffRole) {
+  return role === "業務委託社員" || role === "アルバイト";
+}
+
+function rolePayType(role: StaffRole): PayType {
+  return isHourlyRole(role) ? "hourly" : "monthly";
+}
+
+function showsNightBreakdown(employee?: Employee | null) {
+  return employee?.role === "アルバイト";
+}
+
 function payLabel(employee: Employee) {
-  const label = employee.payType === "monthly" ? "月給" : "時給";
-  if (employee.payType === "monthly" && employeePayAmount(employee) <= 0) return label;
-  return `${label} ${formatYen(employeePayAmount(employee))}`;
+  if (!isHourlyRole(employee.role)) return employee.role;
+  return `${employee.role} 時給 ${formatYen(employeePayAmount(employee))}`;
+}
+
+function applyEmployeePatch(employee: Employee, patch: Partial<Employee>) {
+  const role = normalizeRole(patch.role ?? employee.role, employee.role);
+  const payAmount = isHourlyRole(role) ? Math.max(0, Math.floor(Number(patch.payAmount ?? employee.payAmount ?? 0))) : 0;
+  return {
+    ...employee,
+    ...patch,
+    role,
+    staffCode: patch.staffCode === undefined ? employee.staffCode : patch.staffCode.trim(),
+    payType: rolePayType(role),
+    payAmount,
+    hourlyWage: payAmount
+  };
 }
 
 function recordPay(record: WorkDayRecord, employee: Employee, now: Date) {
-  if (isCurrentWorkMonth(record.workDate, now) || record.payTypeSnapshot === undefined) {
-    return { type: employee.payType, amount: employeePayAmount(employee) };
+  if (isCurrentWorkMonth(record.workDate, now) || record.payRoleSnapshot === undefined) {
+    const role = employee.role;
+    return { role, type: rolePayType(role), amount: employeePayAmount(employee) };
   }
-  return { type: record.payTypeSnapshot, amount: Math.max(0, Math.floor(Number(record.payAmountSnapshot ?? 0))) };
+  const role = record.payRoleSnapshot;
+  return {
+    role,
+    type: rolePayType(role),
+    amount: isHourlyRole(role) ? Math.max(0, Math.floor(Number(record.payAmountSnapshot ?? 0))) : 0
+  };
 }
 
 function laborCost(record: WorkDayRecord, employee: Employee | undefined, now: Date) {
@@ -360,44 +400,48 @@ function laborCost(record: WorkDayRecord, employee: Employee | undefined, now: D
   const pay = recordPay(record, employee, now);
   if (pay.type === "monthly") return null;
   const hourly = pay.amount;
+  if (pay.role === "業務委託社員") return (record.totalMinutes / 60) * hourly;
   const regularMinutes = Math.max(0, record.totalMinutes - record.nightMinutes);
   return (regularMinutes / 60) * hourly + (record.nightMinutes / 60) * hourly * 1.25;
 }
 
 function monthlyPay(totalRecords: WorkDayRecord[], employee: Employee, now: Date) {
   const firstRecord = totalRecords[0];
-  const pay = firstRecord ? recordPay(firstRecord, employee, now) : { type: employee.payType, amount: employeePayAmount(employee) };
+  const pay = firstRecord ? recordPay(firstRecord, employee, now) : { role: employee.role, type: rolePayType(employee.role), amount: employeePayAmount(employee) };
   if (pay.type === "monthly") return pay.amount;
   return totalRecords.reduce((sum, record) => sum + (laborCost(record, employee, now) ?? 0), 0);
 }
 
 function normalizeEmployee(employee: StoredEmployee, index: number): Employee {
   const seed = seedEmployees[index] ?? null;
+  const role = normalizeRole(employee.role, seed?.role ?? (employee.payType === "monthly" ? "社員" : "アルバイト"));
   const oldHourly = Number(employee.hourlyWage ?? seed?.payAmount ?? 1200);
-  const payType: PayType = employee.payType === "monthly" ? "monthly" : "hourly";
+  const payType = rolePayType(role);
   const rawAmount = Number(employee.payAmount ?? employee.hourlyWage ?? seed?.payAmount ?? 1200);
   const staffCode = String(employee.staffCode || seed?.staffCode || 1000 + index);
+  const payAmount = Number.isFinite(rawAmount) && rawAmount >= 0 ? Math.floor(rawAmount) : Math.floor(oldHourly);
 
   return {
     id: employee.id,
     name: employee.name?.trim() || seed?.name || `スタッフ${index + 1}`,
-    role: employee.role?.trim() || seed?.role || "スタッフ",
+    role,
     staffCode,
     payType,
-    payAmount: Number.isFinite(rawAmount) && rawAmount >= 0 ? Math.floor(rawAmount) : Math.floor(oldHourly),
-    hourlyWage: Number.isFinite(oldHourly) && oldHourly >= 0 ? Math.floor(oldHourly) : 1200
+    payAmount: isHourlyRole(role) ? payAmount : 0,
+    hourlyWage: isHourlyRole(role) ? payAmount : 0
   };
 }
 
 function fillMissingPaySnapshots(records: WorkDayRecord[], employees: Employee[]) {
   const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
   return records.map((record) => {
-    if (record.payTypeSnapshot !== undefined) return record;
     const employee = employeeMap.get(record.employeeId);
+    if (record.payTypeSnapshot !== undefined && record.payRoleSnapshot !== undefined) return record;
     if (!employee) return record;
     return {
       ...record,
-      payTypeSnapshot: employee.payType,
+      payRoleSnapshot: employee.role,
+      payTypeSnapshot: rolePayType(employee.role),
       payAmountSnapshot: employeePayAmount(employee)
     };
   });
@@ -456,6 +500,7 @@ function migrateLegacyRecord(record: StoredWorkDayRecord): WorkDayRecord {
     breakMinutes: Number.isFinite(breakMinutes) ? Math.max(0, Math.floor(breakMinutes)) : 0,
     payTypeSnapshot: record.payTypeSnapshot === "monthly" || record.payTypeSnapshot === "hourly" ? record.payTypeSnapshot : undefined,
     payAmountSnapshot: Number.isFinite(payAmountSnapshot) && payAmountSnapshot >= 0 ? Math.floor(payAmountSnapshot) : undefined,
+    payRoleSnapshot: record.payRoleSnapshot ? normalizeRole(record.payRoleSnapshot) : undefined,
     activeStartedAt: record.activeStartedAt ?? null,
     status,
     punches
@@ -562,7 +607,7 @@ export default function AttendancePage() {
   const [editingEmployeeId, setEditingEmployeeId] = useState("");
   const [newEmployeeCode, setNewEmployeeCode] = useState("");
   const [newEmployeeName, setNewEmployeeName] = useState("");
-  const [newPayType, setNewPayType] = useState<PayType>("hourly");
+  const [newRole, setNewRole] = useState<StaffRole>("アルバイト");
   const [newPayAmount, setNewPayAmount] = useState("1200");
   const [manualEmployeeId, setManualEmployeeId] = useState(seedEmployees[0].id);
   const [manualMonth, setManualMonth] = useState(currentMonth());
@@ -652,7 +697,7 @@ export default function AttendancePage() {
         status: realtimeRecord?.status ?? ("off" as const),
         isUnregistered: isUnregisteredRecord(realtimeRecord) || hasOpenFinalPunch(realtimeRecord),
         totalMinutes: realtimeRecord?.totalMinutes ?? 0,
-        pay: currentStaff.payType === "monthly" ? null : realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0
+        pay: isHourlyRole(currentStaff.role) ? realtimeRecord ? laborCost(realtimeRecord, currentStaff, now) : 0 : null
       };
     });
   }, [currentStaff, currentWorkDate, records, now]);
@@ -685,8 +730,8 @@ export default function AttendancePage() {
           const totalMinutes = employeeRecords.reduce((sum, record) => sum + record.totalMinutes, 0);
           const nightMinutes = employeeRecords.reduce((sum, record) => sum + record.nightMinutes, 0);
           const pay = monthlyPay(employeeRecords, employee, now);
-          const payType = employeeRecords[0] ? recordPay(employeeRecords[0], employee, now).type : employee.payType;
-          return { employee, totalMinutes, nightMinutes, pay, payType };
+          const payRole = employeeRecords[0] ? recordPay(employeeRecords[0], employee, now).role : employee.role;
+          return { employee, totalMinutes, nightMinutes, pay, payRole };
         })
         .filter((row) => row.totalMinutes > 0),
     [employees, now, records, summaryMonth]
@@ -695,18 +740,20 @@ export default function AttendancePage() {
   function paySnapshotForEmployee(employee?: Employee) {
     if (!employee) return {};
     return {
-      payTypeSnapshot: employee.payType,
+      payRoleSnapshot: employee.role,
+      payTypeSnapshot: rolePayType(employee.role),
       payAmountSnapshot: employeePayAmount(employee)
     };
   }
 
   function recordForSave(nextRecord: WorkDayRecord, existing?: WorkDayRecord) {
     const employee = employeeById.get(nextRecord.employeeId);
-    if (isCurrentWorkMonth(nextRecord.workDate, now) || existing?.payTypeSnapshot === undefined) {
+    if (isCurrentWorkMonth(nextRecord.workDate, now) || existing?.payRoleSnapshot === undefined) {
       return { ...nextRecord, ...paySnapshotForEmployee(employee) };
     }
     return {
       ...nextRecord,
+      payRoleSnapshot: existing.payRoleSnapshot,
       payTypeSnapshot: existing.payTypeSnapshot,
       payAmountSnapshot: existing.payAmountSnapshot
     };
@@ -925,31 +972,13 @@ export default function AttendancePage() {
     }
 
     const currentEmployee = employeeById.get(employeeId);
-    const nextEmployee = currentEmployee
-      ? {
-          ...currentEmployee,
-          ...patch,
-          staffCode: patch.staffCode === undefined ? currentEmployee.staffCode : patch.staffCode.trim(),
-          payAmount: patch.payAmount === undefined ? currentEmployee.payAmount : Math.max(0, Math.floor(patch.payAmount)),
-          hourlyWage: patch.payAmount === undefined ? currentEmployee.hourlyWage : Math.max(0, Math.floor(patch.payAmount))
-        }
-      : null;
+    const nextEmployee = currentEmployee ? applyEmployeePatch(currentEmployee, patch) : null;
 
     setEmployees((current) =>
-      current.map((employee) =>
-        employee.id === employeeId
-          ? {
-              ...employee,
-              ...patch,
-              staffCode: patch.staffCode === undefined ? employee.staffCode : patch.staffCode.trim(),
-              payAmount: patch.payAmount === undefined ? employee.payAmount : Math.max(0, Math.floor(patch.payAmount)),
-              hourlyWage: patch.payAmount === undefined ? employee.hourlyWage : Math.max(0, Math.floor(patch.payAmount))
-            }
-          : employee
-      )
+      current.map((employee) => (employee.id === employeeId ? applyEmployeePatch(employee, patch) : employee))
     );
 
-    if (nextEmployee && (patch.payType !== undefined || patch.payAmount !== undefined)) {
+    if (nextEmployee && (patch.role !== undefined || patch.payAmount !== undefined)) {
       const targetMonth = businessDate(now).slice(0, 7);
       const snapshot = paySnapshotForEmployee(nextEmployee);
       setRecords((current) =>
@@ -995,7 +1024,7 @@ export default function AttendancePage() {
     if (!adminMode) return;
     const name = newEmployeeName.trim();
     const staffCode = newEmployeeCode.trim();
-    const payAmount = newPayType === "monthly" ? 0 : Math.max(0, Math.floor(Number(newPayAmount) || 0));
+    const payAmount = isHourlyRole(newRole) ? Math.max(0, Math.floor(Number(newPayAmount) || 0)) : 0;
     if (!name || !staffCode) {
       setMessage("スタッフコードと氏名を入力してください。");
       return;
@@ -1005,7 +1034,7 @@ export default function AttendancePage() {
       return;
     }
 
-    const employee: Employee = { id: createId("emp"), name, role: "スタッフ", staffCode, payType: newPayType, payAmount, hourlyWage: payAmount };
+    const employee: Employee = { id: createId("emp"), name, role: newRole, staffCode, payType: rolePayType(newRole), payAmount, hourlyWage: payAmount };
     const nextEmployees = [...employees, employee];
     setMessage("保存中です...");
     void saveSharedStoreImmediately(nextEmployees, records)
@@ -1014,7 +1043,7 @@ export default function AttendancePage() {
         setManualEmployeeId(employee.id);
         setNewEmployeeCode("");
         setNewEmployeeName("");
-        setNewPayType("hourly");
+        setNewRole("アルバイト");
         setNewPayAmount("1200");
         setMessage(`${name}さんを追加しました。`);
       })
@@ -1327,9 +1356,9 @@ export default function AttendancePage() {
   }
 
   function exportSummaryCsv() {
-    const rows: Array<Array<string | number>> = [["氏名", "スタッフコード", "給与形態", "勤務時間", "深夜時間", "給与"]];
+    const rows: Array<Array<string | number>> = [["氏名", "スタッフコード", "役職", "勤務時間", "深夜時間", "給与"]];
     summaryRows.forEach((row) => {
-      rows.push([row.employee.name, row.employee.staffCode, row.payType === "monthly" ? "月給" : "時給", formatDuration(row.totalMinutes), formatDuration(row.nightMinutes), Math.round(row.pay)]);
+      rows.push([row.employee.name, row.employee.staffCode, row.payRole, formatDuration(row.totalMinutes), formatDuration(row.nightMinutes), Math.round(row.pay)]);
     });
     exportCsvFile(`attendance-summary-${summaryMonth}.csv`, rows);
   }
@@ -1437,7 +1466,7 @@ export default function AttendancePage() {
                 <div className="grid gap-2 rounded-md bg-white p-3">
                   <p className="font-bold text-stone-500">当月の勤務時間</p>
                   <p className="text-xl font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.totalMinutes) : "0時間00分"}</p>
-                  <p className="text-xs font-bold text-stone-500">うち深夜時間{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
+                  {showsNightBreakdown(currentStaff) ? <p className="text-xs font-bold text-stone-500">うち深夜時間{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p> : null}
                   <button className="h-9 rounded-md bg-stone-100 px-3 text-sm font-black text-stone-800" onClick={() => setStaffPanel(staffPanel === "work-detail" ? "" : "work-detail")} type="button">
                     詳細
                   </button>
@@ -1483,7 +1512,7 @@ export default function AttendancePage() {
                     )}
                   </div>
                   {staffTodaySummary ? (
-                    <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
+                    <div className={`mt-3 grid gap-2 text-center text-sm ${showsNightBreakdown(currentStaff) ? "grid-cols-3" : "grid-cols-2"}`}>
                       <div className="rounded-md bg-stone-50 px-3 py-2">
                         <p className="text-xs font-bold text-stone-500">休憩</p>
                         <p className="font-black">{formatDuration(staffTodaySummary.breakMinutes)}</p>
@@ -1492,10 +1521,12 @@ export default function AttendancePage() {
                         <p className="text-xs font-bold text-stone-500">勤務</p>
                         <p className="font-black">{formatDuration(staffTodaySummary.totalMinutes)}</p>
                       </div>
-                      <div className="rounded-md bg-stone-50 px-3 py-2">
-                        <p className="text-xs font-bold text-stone-500">深夜</p>
-                        <p className="font-black">{formatDuration(staffTodaySummary.nightMinutes)}</p>
-                      </div>
+                      {showsNightBreakdown(currentStaff) ? (
+                        <div className="rounded-md bg-stone-50 px-3 py-2">
+                          <p className="text-xs font-bold text-stone-500">深夜</p>
+                          <p className="font-black">{formatDuration(staffTodaySummary.nightMinutes)}</p>
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
                     <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">勤務開始と勤務終了の順番を確認してください。</p>
@@ -1592,7 +1623,7 @@ export default function AttendancePage() {
                   <button className={`h-14 rounded-md px-4 text-lg font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60 ${currentIsWorking ? "bg-stone-900" : "bg-emerald-600"}`} disabled={isPunchSaving} onClick={handleWorkToggle} type="button">
                     {isPunchSaving ? "保存中..." : currentIsWorking ? "勤務終了" : "勤務開始"}
                   </button>
-                  <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-3">
+                  <div className={`grid grid-cols-2 gap-2 text-center text-sm ${showsNightBreakdown(punchStaff) ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                     <div className="rounded-md bg-stone-50 p-3">
                       <p className="font-bold text-stone-500">本日の勤務</p>
                       <p className="font-black">{currentRealtimeRecord ? formatDuration(currentRealtimeRecord.totalMinutes) : "0時間00分"}</p>
@@ -1601,10 +1632,12 @@ export default function AttendancePage() {
                       <p className="font-bold text-stone-500">当月の勤務</p>
                       <p className="font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.totalMinutes) : "0時間00分"}</p>
                     </div>
-                    <div className="rounded-md bg-stone-50 p-3 max-sm:col-span-2">
-                      <p className="font-bold text-stone-500">当月の深夜</p>
-                      <p className="font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
-                    </div>
+                    {showsNightBreakdown(punchStaff) ? (
+                      <div className="rounded-md bg-stone-50 p-3 max-sm:col-span-2">
+                        <p className="font-bold text-stone-500">当月の深夜</p>
+                        <p className="font-black">{currentMonthSummary ? formatDuration(currentMonthSummary.nightMinutes) : "0時間00分"}</p>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 {currentRealtimeRecord?.status === "missing" ? <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">前回の勤務終了が未登録です。手入力・修正で修正してください。</p> : null}
@@ -1653,12 +1686,15 @@ export default function AttendancePage() {
                       {editingEmployeeId === employee.id ? (
                         <div className="mt-3 grid gap-2">
                           <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { staffCode: event.target.value })} value={employee.staffCode} />
-                          <div className="grid grid-cols-[1fr_1fr] gap-2">
-                            <select className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { payType: event.target.value as PayType })} value={employee.payType}>
-                              <option value="hourly">時給</option>
-                              <option value="monthly">月給</option>
+                          <div className={isHourlyRole(employee.role) ? "grid grid-cols-[1fr_1fr] gap-2" : "grid gap-2"}>
+                            <select className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { role: event.target.value as StaffRole })} value={employee.role}>
+                              {staffRoles.map((role) => (
+                                <option key={role} value={role}>
+                                  {role}
+                                </option>
+                              ))}
                             </select>
-                            <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => updateEmployee(employee.id, { payAmount: Number(event.target.value) || 0 })} type="number" value={employeePayAmount(employee)} />
+                            {isHourlyRole(employee.role) ? <input className="h-10 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => updateEmployee(employee.id, { payAmount: Number(event.target.value) || 0 })} type="number" value={employeePayAmount(employee)} /> : null}
                           </div>
                           {employee.id !== "emp-manager" ? (
                             <button className="h-10 rounded-md bg-rose-50 px-3 text-sm font-black text-rose-700" onClick={() => handleDeleteEmployee(employee.id)} type="button">
@@ -1678,7 +1714,7 @@ export default function AttendancePage() {
                       <tr>
                         <th className="px-4 py-3">スタッフコード</th>
                         <th className="px-4 py-3">氏名</th>
-                        <th className="px-4 py-3">給与</th>
+                        <th className="px-4 py-3">役職・給与</th>
                         <th className="px-4 py-3">操作</th>
                       </tr>
                     </thead>
@@ -1694,11 +1730,14 @@ export default function AttendancePage() {
                           <td className="px-4 py-3">
                             {editingEmployeeId === employee.id ? (
                               <div className="flex flex-wrap gap-2">
-                                <select className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { payType: event.target.value as PayType })} value={employee.payType}>
-                                  <option value="hourly">時給</option>
-                                  <option value="monthly">月給</option>
+                                <select className="h-10 rounded-md border border-stone-300 px-3 font-bold outline-none" onChange={(event) => updateEmployee(employee.id, { role: event.target.value as StaffRole })} value={employee.role}>
+                                  {staffRoles.map((role) => (
+                                    <option key={role} value={role}>
+                                      {role}
+                                    </option>
+                                  ))}
                                 </select>
-                                <input className="h-10 w-32 rounded-md border border-stone-300 px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => updateEmployee(employee.id, { payAmount: Number(event.target.value) || 0 })} type="number" value={employeePayAmount(employee)} />
+                                {isHourlyRole(employee.role) ? <input className="h-10 w-32 rounded-md border border-stone-300 px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => updateEmployee(employee.id, { payAmount: Number(event.target.value) || 0 })} type="number" value={employeePayAmount(employee)} /> : null}
                               </div>
                             ) : (
                               <span>{payLabel(employee)}</span>
@@ -1737,15 +1776,18 @@ export default function AttendancePage() {
                     <input className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => setNewEmployeeName(event.target.value)} value={newEmployeeName} />
                   </label>
                   <label className="grid gap-2 text-sm font-bold text-stone-600">
-                    時給or月給:
-                    <select className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => setNewPayType(event.target.value as PayType)} value={newPayType}>
-                      <option value="hourly">時給</option>
-                      <option value="monthly">月給</option>
+                    役職:
+                    <select className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" onChange={(event) => setNewRole(event.target.value as StaffRole)} value={newRole}>
+                      {staffRoles.map((role) => (
+                        <option key={role} value={role}>
+                          {role}
+                        </option>
+                      ))}
                     </select>
                   </label>
-                  {newPayType === "hourly" ? (
+                  {isHourlyRole(newRole) ? (
                     <label className="grid gap-2 text-sm font-bold text-stone-600">
-                      金額（円）:
+                      時給（円）:
                       <input className="h-11 rounded-md border border-stone-300 bg-white px-3 font-bold outline-none" inputMode="numeric" onChange={(event) => setNewPayAmount(event.target.value)} type="number" value={newPayAmount} />
                     </label>
                   ) : null}
