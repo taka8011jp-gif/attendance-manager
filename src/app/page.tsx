@@ -575,9 +575,6 @@ export default function AttendancePage() {
   const [staffPanel, setStaffPanel] = useState<StaffPanel>("");
   const [staffSaveNotice, setStaffSaveNotice] = useState("");
   const [isPunchSaving, setIsPunchSaving] = useState(false);
-  const hasLoadedStore = useRef(false);
-  const hasPendingSave = useRef(false);
-  const skipNextAutoSave = useRef(false);
   const punchSavingRef = useRef(false);
 
   useEffect(() => {
@@ -599,7 +596,6 @@ export default function AttendancePage() {
         if (isMounted) setDataError("共有データに接続できません。Vercelの環境変数とSupabaseを確認してください。");
       } finally {
         if (isMounted) {
-          hasLoadedStore.current = true;
           setIsLoading(false);
         }
       }
@@ -612,77 +608,17 @@ export default function AttendancePage() {
   }, []);
 
   useEffect(() => {
-    async function refreshSharedStore() {
-      if (hasPendingSave.current) return;
-      try {
-        const response = await fetch("/api/attendance", { cache: "no-store" });
-        if (!response.ok) return;
-        const store = (await response.json()) as AttendanceStore;
-        const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
-        setEmployees(normalizedEmployees);
-        setRecords(fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees));
-        setDataError("");
-      } catch {
-        setDataError("共有データとの同期が止まっています。");
-      }
-    }
-
-    const refreshNow = () => {
+    const updateClock = () => {
       const current = new Date();
       setNow(current);
       setRecords((existing) => closeExpiredRecords(existing, current));
-      void refreshSharedStore();
     };
 
-    const refreshOnFocus = () => {
-      if (!document.hidden) refreshNow();
-    };
-
-    const timer = window.setInterval(refreshNow, SYNC_INTERVAL_MS);
-    window.addEventListener("focus", refreshNow);
-    document.addEventListener("visibilitychange", refreshOnFocus);
+    const timer = window.setInterval(updateClock, SYNC_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", refreshNow);
-      document.removeEventListener("visibilitychange", refreshOnFocus);
     };
   }, []);
-
-  useEffect(() => {
-    if (!hasLoadedStore.current) return;
-    if (skipNextAutoSave.current) {
-      skipNextAutoSave.current = false;
-      return;
-    }
-    hasPendingSave.current = true;
-    const controller = new AbortController();
-    const saveTimer = window.setTimeout(() => {
-      setIsSaving(true);
-      void fetch("/api/attendance", {
-        body: JSON.stringify({ employees, records }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-        signal: controller.signal
-      })
-        .then((response) => {
-          if (!response.ok) throw new Error("保存できませんでした。");
-          setDataError("");
-        })
-        .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") return;
-          setDataError("共有データを保存できません。Vercelの環境変数とSupabaseを確認してください。");
-        })
-        .finally(() => {
-          hasPendingSave.current = false;
-          setIsSaving(false);
-        });
-    }, 250);
-
-    return () => {
-      controller.abort();
-      window.clearTimeout(saveTimer);
-    };
-  }, [employees, records]);
 
   const employeeById = useMemo(() => new Map(employees.map((employee) => [employee.id, employee])), [employees]);
   const currentStaff = employeeById.get(currentStaffId) ?? null;
@@ -786,10 +722,6 @@ export default function AttendancePage() {
     return [recordForSave(nextRecord), ...current];
   }
 
-  function upsertRecord(nextRecord: WorkDayRecord) {
-    setRecords((current) => upsertRecordList(current, nextRecord));
-  }
-
   function normalizeSharedStoreSnapshot(store: AttendanceStore): SharedStoreSnapshot {
     const normalizedEmployees = (store.employees.length > 0 ? store.employees : seedEmployees).map(normalizeEmployee);
     const normalizedRecords = fillMissingPaySnapshots(closeExpiredRecords(store.records.map(migrateLegacyRecord), new Date()), normalizedEmployees);
@@ -800,8 +732,7 @@ export default function AttendancePage() {
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
-  async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[], options: { keepPending?: boolean } = {}) {
-    hasPendingSave.current = true;
+  async function saveSharedStoreImmediately(nextEmployees: Employee[], nextRecords: WorkDayRecord[]) {
     setIsSaving(true);
     try {
       let lastError: unknown = null;
@@ -823,71 +754,34 @@ export default function AttendancePage() {
       }
       throw lastError instanceof Error ? lastError : new Error("保存できませんでした。");
     } finally {
-      if (!options.keepPending) {
-        hasPendingSave.current = false;
-        setIsSaving(false);
-      }
+      setIsSaving(false);
     }
   }
 
-  async function fetchSharedStoreSnapshot() {
-    const response = await fetch("/api/attendance", { cache: "no-store" });
-    if (!response.ok) throw new Error("共有データを確認できませんでした。");
-    const store = (await response.json()) as AttendanceStore;
-    return normalizeSharedStoreSnapshot(store);
-  }
-
-  function punchListsMatch(left: Punch[], right: Punch[]) {
-    const leftPunches = sortedPunches({ id: "left", employeeId: "", workDate: "", totalMinutes: 0, nightMinutes: 0, breakMinutes: 0, activeStartedAt: null, status: "registered", punches: left });
-    const rightPunches = sortedPunches({ id: "right", employeeId: "", workDate: "", totalMinutes: 0, nightMinutes: 0, breakMinutes: 0, activeStartedAt: null, status: "registered", punches: right });
-    return leftPunches.length === rightPunches.length && leftPunches.every((punch, index) => punch.type === rightPunches[index]?.type && punch.at === rightPunches[index]?.at);
-  }
-
-  function recordMatchesSavedRecord(expected: WorkDayRecord, saved?: WorkDayRecord) {
-    if (!saved) return false;
-    return punchListsMatch(expected.punches, saved.punches);
-  }
-
-  async function waitForSharedRecord(expectedRecord: WorkDayRecord) {
-    let latestSnapshot: SharedStoreSnapshot | null = null;
-    for (let attempt = 0; attempt < 15; attempt += 1) {
-      latestSnapshot = await fetchSharedStoreSnapshot();
-      const savedRecord = latestSnapshot.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
-      if (recordMatchesSavedRecord(expectedRecord, savedRecord)) return latestSnapshot;
-      await wait(700);
-    }
-    throw new Error("保存後の同期を確認できませんでした。");
+  function applySavedStore(savedStore: SharedStoreSnapshot) {
+    setEmployees(savedStore.employees);
+    setRecords(savedStore.records);
   }
 
   function savePunchRecord(nextRecord: WorkDayRecord, successMessage: string) {
     const nextRecords = upsertRecordList(records, nextRecord);
-    const expectedRecord = nextRecords.find((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate) ?? nextRecord;
     setMessage("保存中です...");
 
-    return saveSharedStoreImmediately(employees, nextRecords, { keepPending: true })
-      .then(async (savedStore) => {
-        setMessage("共有データを確認しています...");
-        const savedRecord = savedStore.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
-        const confirmedStore = recordMatchesSavedRecord(expectedRecord, savedRecord) ? savedStore : await waitForSharedRecord(expectedRecord);
-        const confirmedRecord = confirmedStore.records.find((record) => record.employeeId === expectedRecord.employeeId && record.workDate === expectedRecord.workDate);
-        const draftKey = manualDraftKeyFor(expectedRecord.employeeId, expectedRecord.workDate);
-        skipNextAutoSave.current = true;
-        setEmployees(confirmedStore.employees);
-        setRecords(confirmedStore.records);
+    return saveSharedStoreImmediately(employees, nextRecords)
+      .then((savedStore) => {
+        const savedRecord = savedStore.records.find((record) => record.employeeId === nextRecord.employeeId && record.workDate === nextRecord.workDate);
+        const draftKey = manualDraftKeyFor(nextRecord.employeeId, nextRecord.workDate);
+        applySavedStore(savedStore);
         setManualDrafts((current) => ({
           ...current,
-          [draftKey]: draftFromRecord(confirmedRecord ?? expectedRecord)
+          [draftKey]: draftFromRecord(savedRecord ?? nextRecord)
         }));
         setMessage(successMessage);
       })
       .catch(() => {
-        setDataError("共有データへの保存確認が完了できません。通信状況を確認してもう一度押してください。");
-        setMessage("保存確認ができませんでした。もう一度押してください。");
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
         throw new Error("Punch save failed");
-      })
-      .finally(() => {
-        hasPendingSave.current = false;
-        setIsSaving(false);
       });
   }
 
@@ -1071,6 +965,31 @@ export default function AttendancePage() {
     }
   }
 
+  function saveCurrentStore(successMessage: string) {
+    setMessage("保存中です...");
+    return saveSharedStoreImmediately(employees, records)
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setMessage(successMessage);
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+        throw new Error("Store save failed");
+      });
+  }
+
+  function handleEmployeeEditToggle(employeeId: string) {
+    if (editingEmployeeId !== employeeId) {
+      setEditingEmployeeId(employeeId);
+      return;
+    }
+
+    void saveCurrentStore("メンバー情報を保存しました。")
+      .then(() => setEditingEmployeeId(""))
+      .catch(() => undefined);
+  }
+
   function handleAddEmployee(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!adminMode) return;
@@ -1087,13 +1006,22 @@ export default function AttendancePage() {
     }
 
     const employee: Employee = { id: createId("emp"), name, role: "スタッフ", staffCode, payType: newPayType, payAmount, hourlyWage: payAmount };
-    setEmployees((current) => [...current, employee]);
-    setManualEmployeeId(employee.id);
-    setNewEmployeeCode("");
-    setNewEmployeeName("");
-    setNewPayType("hourly");
-    setNewPayAmount("1200");
-    setMessage(`${name}さんを追加しました。`);
+    const nextEmployees = [...employees, employee];
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(nextEmployees, records)
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setManualEmployeeId(employee.id);
+        setNewEmployeeCode("");
+        setNewEmployeeName("");
+        setNewPayType("hourly");
+        setNewPayAmount("1200");
+        setMessage(`${name}さんを追加しました。`);
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function handleDeleteEmployee(employeeId: string) {
@@ -1103,10 +1031,19 @@ export default function AttendancePage() {
       return;
     }
     const employee = employeeById.get(employeeId);
-    setEmployees((current) => current.filter((item) => item.id !== employeeId));
-    setRecords((current) => current.filter((record) => record.employeeId !== employeeId));
-    setEditingEmployeeId("");
-    setMessage(`${employee?.name ?? "メンバー"}さんを削除しました。`);
+    const nextEmployees = employees.filter((item) => item.id !== employeeId);
+    const nextRecords = records.filter((record) => record.employeeId !== employeeId);
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(nextEmployees, nextRecords)
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setEditingEmployeeId("");
+        setMessage(`${employee?.name ?? "メンバー"}さんを削除しました。`);
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function manualDraftKeyFor(employeeId: string, workDate: string) {
@@ -1280,9 +1217,8 @@ export default function AttendancePage() {
     const nextRecords = upsertRecordList(records, nextRecord);
     setMessage("保存中です...");
     void saveSharedStoreImmediately(employees, nextRecords)
-      .then(() => {
-        skipNextAutoSave.current = true;
-        setRecords(nextRecords);
+      .then((savedStore) => {
+        applySavedStore(savedStore);
         setMessage("本日の勤務を修正しました。");
         showStaffSavedNotice("保存しました");
       })
@@ -1303,9 +1239,18 @@ export default function AttendancePage() {
       setMessage("勤務終了は勤務開始より後の時刻にしてください。");
       return;
     }
-    upsertRecord(nextRecord);
-    setMessage(`${manualDate} を保存しました。`);
-    showSavedNotice("保存しました");
+    const nextRecords = upsertRecordList(records, nextRecord);
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(employees, nextRecords)
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setMessage(`${manualDate} を保存しました。`);
+        showSavedNotice("保存しました");
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function saveManualMonth() {
@@ -1321,17 +1266,23 @@ export default function AttendancePage() {
       return;
     }
 
-    setRecords((current) => {
-      const targetDates = new Set(monthDays(manualMonth));
-      const others = current.filter((record) => record.employeeId !== manualEmployeeId || !targetDates.has(record.workDate));
-      const recordsForSave = (nextRecords.filter(Boolean) as WorkDayRecord[]).map((record) => {
-        const existing = current.find((item) => item.employeeId === record.employeeId && item.workDate === record.workDate);
-        return recordForSave(record, existing);
-      });
-      return [...others, ...recordsForSave];
+    const targetDates = new Set(monthDays(manualMonth));
+    const others = records.filter((record) => record.employeeId !== manualEmployeeId || !targetDates.has(record.workDate));
+    const recordsForSave = (nextRecords.filter(Boolean) as WorkDayRecord[]).map((record) => {
+      const existing = records.find((item) => item.employeeId === record.employeeId && item.workDate === record.workDate);
+      return recordForSave(record, existing);
     });
-    setMessage(`${manualMonth} の勤怠を保存しました。`);
-    showSavedNotice("保存しました");
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(employees, [...others, ...recordsForSave])
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setMessage(`${manualMonth} の勤怠を保存しました。`);
+        showSavedNotice("保存しました");
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function handleDeleteRecord(recordId: string) {
@@ -1342,8 +1293,17 @@ export default function AttendancePage() {
       return;
     }
     if (!window.confirm("この勤怠記録を削除しますか？")) return;
-    setRecords((current) => current.filter((record) => record.id !== recordId));
-    setMessage("勤怠記録を削除しました。");
+    const nextRecords = records.filter((record) => record.id !== recordId);
+    setMessage("保存中です...");
+    void saveSharedStoreImmediately(employees, nextRecords)
+      .then((savedStore) => {
+        applySavedStore(savedStore);
+        setMessage("勤怠記録を削除しました。");
+      })
+      .catch(() => {
+        setDataError("共有データを保存できません。通信状況を確認してもう一度押してください。");
+        setMessage("保存できませんでした。もう一度押してください。");
+      });
   }
 
   function exportRecordsCsv() {
@@ -1686,7 +1646,7 @@ export default function AttendancePage() {
                             <p className="mt-1 truncate text-xl font-black">{employee.name}</p>
                           )}
                         </div>
-                        <button className="h-9 shrink-0 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => setEditingEmployeeId(editingEmployeeId === employee.id ? "" : employee.id)} type="button">
+                        <button className="h-9 shrink-0 rounded-md bg-stone-900 px-3 text-sm font-black text-white disabled:bg-stone-300" disabled={isSaving} onClick={() => handleEmployeeEditToggle(employee.id)} type="button">
                           {editingEmployeeId === employee.id ? "完了" : "編集"}
                         </button>
                       </div>
@@ -1746,7 +1706,7 @@ export default function AttendancePage() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex gap-2">
-                              <button className="h-9 rounded-md bg-stone-900 px-3 text-sm font-black text-white" onClick={() => setEditingEmployeeId(editingEmployeeId === employee.id ? "" : employee.id)} type="button">
+                              <button className="h-9 rounded-md bg-stone-900 px-3 text-sm font-black text-white disabled:bg-stone-300" disabled={isSaving} onClick={() => handleEmployeeEditToggle(employee.id)} type="button">
                                 {editingEmployeeId === employee.id ? "完了" : "編集"}
                               </button>
                               {employee.id !== "emp-manager" ? (
